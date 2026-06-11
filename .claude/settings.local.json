@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python scripts/parser.py)",
+      "Bash(python3 -c \"import sys; print\\('Python executable:', sys.executable\\)\")",
+      "Bash(py --version)",
+      "Bash(python -m pip install -q requests beautifulsoup4 lxml)",
+      "Bash(python fetcher.py)",
+      "Bash(python *)"
+    ]
+  }
+}

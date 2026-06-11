@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "gov-doc-collector": {
+      "command": "python",
+      "args": ["-u", "D:\\myProject\\hermes_agent\\scripts\\mcp_server.py"],
+      "env": {}
+    }
+  }
+}

@@ -1,0 +1,363 @@
+{
+  "gov_cn": {
+    "name": "中国政府网",
+    "base_url": "https://www.gov.cn",
+    "search_path": "/zhengce/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "ndrc": {
+    "name": "国家发展改革委",
+    "base_url": "https://www.ndrc.gov.cn",
+    "search_path": "/xxgk/zcfb/fzggwl/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "moe": {
+    "name": "教育部",
+    "base_url": "https://www.moe.gov.cn",
+    "search_path": "/jyb_xxgk/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "most": {
+    "name": "科技部",
+    "base_url": "https://www.most.gov.cn",
+    "search_path": "/xxgk/xinxifenlei/fdzdgknr/qtwj/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "note": "其他文件列表"
+  },
+  "miit": {
+    "name": "工业和信息化部",
+    "base_url": "https://www.miit.gov.cn",
+    "search_path": "/search/zcwjk.html?websiteid=110000000000000&pg=&p=&tpl=14&category=183&q=",
+    "selectors": {
+      "list": "div.search-list-t",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "need_js": true
+  },
+  "mps": {
+    "name": "公安部",
+    "base_url": "https://www.mps.gov.cn",
+    "search_path": "/n2254536/n4904355/index.html",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "use_cffi": true,
+    "note": "Cloudflare JS Challenge,需curl_cffi"
+  },
+  "mca": {
+    "name": "民政部",
+    "base_url": "https://www.mca.gov.cn",
+    "search_path": "/gdnps/pc/index.jsp?mtype=1",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "need_js": true,
+    "note": "JSP动态页面,需JS渲染"
+  },
+  "moj": {
+    "name": "司法部",
+    "base_url": "https://www.moj.gov.cn",
+    "search_path": "/pub/sfbgw/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "mof": {
+    "name": "财政部",
+    "base_url": "https://www.mof.gov.cn",
+    "search_path": "/zhengwuxinxi/zhengcefabu/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "mohrss": {
+    "name": "人力资源社会保障部",
+    "base_url": "https://www.mohrss.gov.cn",
+    "search_path": "/xxgk2020/fdzdgknr/zcfg/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "need_js": true,
+    "note": "需Playwright JS渲染"
+  },
+  "mnr": {
+    "name": "自然资源部",
+    "base_url": "https://www.mnr.gov.cn",
+    "search_path": "/gk/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "use_cffi": true,
+    "note": "反爬虫较强,使用curl_cffi"
+  },
+  "mee": {
+    "name": "生态环境部",
+    "base_url": "https://www.mee.gov.cn",
+    "search_path": "/wjk/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "need_js": true,
+    "note": "首页+iframe,需JS渲染"
+  },
+  "mohurd": {
+    "name": "住房城乡建设部",
+    "base_url": "https://www.mohurd.gov.cn",
+    "search_path": "/gongkai/zhengce/gzk/index.html",
+    "selectors": {
+      "list": "table tr",
+      "title": "a",
+      "link": "a@href",
+      "date": "td"
+    },
+    "need_js": true,
+    "note": "iframe嵌套,需Playwright"
+  },
+  "mot": {
+    "name": "交通运输部",
+    "base_url": "https://www.mot.gov.cn",
+    "search_path": "/gongkai/zcjd/index.html",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "mwr": {
+    "name": "水利部",
+    "base_url": "https://www.mwr.gov.cn",
+    "search_path": "/zwgk/gknr/202406/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "use_cffi": true,
+    "note": "TCP连接超时,需curl_cffi或代理"
+  },
+  "moa": {
+    "name": "农业农村部",
+    "base_url": "https://www.moa.gov.cn",
+    "search_path": "/gk/zcfg/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "mofcom": {
+    "name": "商务部",
+    "base_url": "https://www.mofcom.gov.cn",
+    "search_path": "/zwgk/zcfb/index.html",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "mct": {
+    "name": "文化和旅游部",
+    "base_url": "https://www.mct.gov.cn",
+    "search_path": "/whzx/whyw/",
+    "selectors": {
+      "list": "table tr",
+      "title": "a",
+      "link": "a@href",
+      "date": "td"
+    }
+  },
+  "nhc": {
+    "name": "国家卫生健康委",
+    "base_url": "http://www.nhc.gov.cn",
+    "search_path": "/wjw/index.html",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "use_cffi": true,
+    "note": "阿里云WAF 412,需curl_cffi"
+  },
+  "mara": {
+    "name": "退役军人事务部",
+    "base_url": "https://www.mva.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "mem": {
+    "name": "应急管理部",
+    "base_url": "https://www.mem.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": ".list li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "need_js": true,
+    "note": "需Playwright JS渲染"
+  },
+  "pbc": {
+    "name": "中国人民银行",
+    "base_url": "https://www.pbc.gov.cn",
+    "search_path": "/tiaofasi/144941/index.html",
+    "selectors": {
+      "list": "table tr",
+      "title": "a",
+      "link": "a@href",
+      "date": "td"
+    }
+  },
+  "cnao": {
+    "name": "审计署",
+    "base_url": "https://www.audit.gov.cn",
+    "search_path": "/n4/n18/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "need_js": true,
+    "note": "审计动态列表,需Playwright"
+  },
+  "samr": {
+    "name": "市场监管总局",
+    "base_url": "https://www.samr.gov.cn",
+    "search_path": "/zw/zjwj/index.html",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "need_js": true,
+    "note": "动态加载,需JS渲染"
+  },
+  "gsa": {
+    "name": "国家体育总局",
+    "base_url": "https://www.sport.gov.cn",
+    "search_path": "/n4/n28243770/index.html",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "note": "政策法规栏目"
+  },
+  "nra": {
+    "name": "国家宗教事务局",
+    "base_url": "https://www.sara.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "need_js": true,
+    "note": "整站JS渲染,需Playwright"
+  },
+  "nea": {
+    "name": "国家能源局",
+    "base_url": "https://www.nea.gov.cn",
+    "search_path": "/nyflfg/index.htm",
+    "selectors": {
+      "list": "div.list01 li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "note": "能源法律法规库"
+  },
+  "nsa": {
+    "name": "国家统计局",
+    "base_url": "https://www.stats.gov.cn",
+    "search_path": "/sj/zxfb/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "note": "统计数据发布"
+  },
+  "cbirc": {
+    "name": "国家金融监督管理总局",
+    "base_url": "https://www.cbirc.gov.cn",
+    "search_path": "/cn/view/pages/index/index.html",
+    "selectors": {
+      "list": ".list li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "use_cffi": true,
+    "note": "TCP RST,需curl_cffi"
+  },
+  "csrc": {
+    "name": "中国证监会",
+    "base_url": "https://www.csrc.gov.cn",
+    "search_path": "/csrc/c100039/common_list.shtml",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  }
+}

@@ -1,0 +1,359 @@
+{
+  "beijing": {
+    "name": "北京市",
+    "base_url": "https://www.beijing.gov.cn",
+    "search_path": "/zhengce/zhengcefagui/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": ".date"
+    }
+  },
+  "tianjin": {
+    "name": "天津市",
+    "base_url": "https://www.tj.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "shanghai": {
+    "name": "上海市",
+    "base_url": "https://www.shanghai.gov.cn",
+    "search_path": "/nw12344/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": ".time"
+    }
+  },
+  "chongqing": {
+    "name": "重庆市",
+    "base_url": "https://www.cq.gov.cn",
+    "search_path": "/zwgk/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "hebei": {
+    "name": "河北省",
+    "base_url": "https://www.hebei.gov.cn",
+    "search_path": "/columns/e4a82431-5daf-4e1f-b7ff-80a68ad951b2/index.html",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "note": "政府规章栏目"
+  },
+  "shanxi": {
+    "name": "山西省",
+    "base_url": "http://www.shanxi.gov.cn",
+    "search_path": "/zfxxgk/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "liaoning": {
+    "name": "辽宁省",
+    "base_url": "https://www.ln.gov.cn",
+    "search_path": "/zfxx/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "jilin": {
+    "name": "吉林省",
+    "base_url": "http://www.jl.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "heilongjiang": {
+    "name": "黑龙江省",
+    "base_url": "https://www.hlj.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "jiangsu": {
+    "name": "江苏省",
+    "base_url": "https://www.jiangsu.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "zhejiang": {
+    "name": "浙江省",
+    "base_url": "http://www.zj.gov.cn",
+    "search_path": "/col/col1544911/index.html",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "note": "法规文件栏目"
+  },
+  "anhui": {
+    "name": "安徽省",
+    "base_url": "https://www.ah.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "fujian": {
+    "name": "福建省",
+    "base_url": "https://www.fujian.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "jiangxi": {
+    "name": "江西省",
+    "base_url": "https://www.jiangxi.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "use_cffi": true
+  },
+  "shandong": {
+    "name": "山东省",
+    "base_url": "http://www.shandong.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "henan": {
+    "name": "河南省",
+    "base_url": "https://www.henan.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "hubei": {
+    "name": "湖北省",
+    "base_url": "http://www.hubei.gov.cn",
+    "search_path": "/zfwj/ezbf/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "use_cffi": true,
+    "note": "阿里云WAF 412,需curl_cffi"
+  },
+  "hunan": {
+    "name": "湖南省",
+    "base_url": "http://www.hunan.gov.cn",
+    "search_path": "/hnszf/xxgk/wjk/szfwj/",
+    "selectors": {
+      "list": "table tr",
+      "title": "a",
+      "link": "a@href",
+      "date": "td"
+    },
+    "use_cffi": true,
+    "need_js": true,
+    "note": "需curl_cffi+Playwright组合"
+  },
+  "guangdong": {
+    "name": "广东省",
+    "base_url": "https://www.gd.gov.cn",
+    "search_path": "/zwgk/wjk/",
+    "selectors": {
+      "list": "ul li",
+      "title": "span.name",
+      "link": "a@href",
+      "date": "span.time"
+    }
+  },
+  "guangxi": {
+    "name": "广西壮族自治区",
+    "base_url": "https://www.gxzf.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "use_cffi": true,
+    "note": "SSL/TLS连接问题,需curl_cffi"
+  },
+  "hainan": {
+    "name": "海南省",
+    "base_url": "https://www.hainan.gov.cn",
+    "search_path": "/hainan/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "sichuan": {
+    "name": "四川省",
+    "base_url": "https://www.sc.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "guizhou": {
+    "name": "贵州省",
+    "base_url": "https://www.guizhou.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "yunnan": {
+    "name": "云南省",
+    "base_url": "https://www.yn.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "shaanxi": {
+    "name": "陕西省",
+    "base_url": "https://www.shaanxi.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "gansu": {
+    "name": "甘肃省",
+    "base_url": "https://www.gansu.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "use_cffi": true,
+    "note": "阿里云WAF 412,需curl_cffi"
+  },
+  "qinghai": {
+    "name": "青海省",
+    "base_url": "https://www.qh.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "use_cffi": true,
+    "note": "TCP RST,需curl_cffi"
+  },
+  "ningxia": {
+    "name": "宁夏回族自治区",
+    "base_url": "https://www.nx.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "xinjiang": {
+    "name": "新疆维吾尔自治区",
+    "base_url": "https://www.xinjiang.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    },
+    "use_cffi": true,
+    "note": "20s超时,需curl_cffi或更长超时"
+  },
+  "neimenggu": {
+    "name": "内蒙古自治区",
+    "base_url": "https://www.nmg.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  },
+  "xizang": {
+    "name": "西藏自治区",
+    "base_url": "https://www.xizang.gov.cn",
+    "search_path": "/",
+    "selectors": {
+      "list": "ul li",
+      "title": "a",
+      "link": "a@href",
+      "date": "span"
+    }
+  }
+}

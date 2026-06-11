@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# 虚拟环境
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Playwright 浏览器缓存 (430MB)
+playwright/.cache/
+playwright/browser/
+.cache/ms-playwright/
+
+# 测试输出
+scripts/debug_*.html
+
+# 临时文件
+*.log
+*.tmp
+.env
+
+# 数据缓存(保留示例文件)
+scripts/diagnose_results.json
