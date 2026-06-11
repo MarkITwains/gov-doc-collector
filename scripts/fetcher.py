@@ -69,12 +69,28 @@ class GovDocFetcher:
 
         return []
 
-    def fetch_detail(self, url: str) -> str:
-        """获取详情页内容"""
-        resp = self.session.get(url, timeout=30, verify=False)
-        resp.raise_for_status()
-        resp.encoding = 'utf-8'
-        return resp.text
+    def fetch_detail(self, url: str) -> Dict:
+        """
+        获取详情页内容并结构化提取。
+        返回字典: {content_text, content_html, word_count, attachments, metadata, has_content, error?}
+        """
+        from detail_extractor import extract_detail
+        try:
+            resp = self.session.get(url, timeout=30, verify=False)
+            resp.raise_for_status()
+            resp.encoding = 'utf-8'
+            return extract_detail(resp.text, url)
+        except Exception as e:
+            return {
+                'url': url,
+                'content_text': '',
+                'content_html': '',
+                'word_count': 0,
+                'attachments': [],
+                'metadata': {},
+                'has_content': False,
+                'error': str(e),
+            }
 
 if __name__ == "__main__":
     fetcher = GovDocFetcher()

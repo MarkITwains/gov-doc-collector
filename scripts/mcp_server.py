@@ -54,6 +54,58 @@ class GovDocMCPServer:
                             }
                         }
                     }
+                },
+                {
+                    "name": "fetch_gov_doc_detail",
+                    "description": "采集指定政策详情页正文(发文字号/发文日期/附件/正文)",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "详情页 URL"
+                            },
+                            "base_url": {
+                                "type": "string",
+                                "description": "站点 base_url(可选,用于附件绝对化)"
+                            },
+                            "use_cffi": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": "是否启用 curl_cffi 绕过 WAF"
+                            },
+                            "need_js": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": "是否需要 Playwright JS 渲染"
+                            }
+                        },
+                        "required": ["url"]
+                    }
+                },
+                {
+                    "name": "fetch_gov_docs_with_details",
+                    "description": "采集指定站点列表+前 N 条详情正文",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "site_key": {
+                                "type": "string",
+                                "description": "站点标识符"
+                            },
+                            "level": {
+                                "type": "string",
+                                "enum": ["national", "provincial"],
+                                "default": "national"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "default": 5,
+                                "description": "详情抓取条数(详情抓取慢,建议 ≤ 10)"
+                            }
+                        },
+                        "required": ["site_key"]
+                    }
                 }
             ]
         }
@@ -63,6 +115,10 @@ class GovDocMCPServer:
             return self._fetch_gov_docs(**arguments)
         elif name == "list_available_sites":
             return self._list_available_sites(**arguments)
+        elif name == "fetch_gov_doc_detail":
+            return self._fetch_gov_doc_detail(**arguments)
+        elif name == "fetch_gov_docs_with_details":
+            return self._fetch_gov_docs_with_details(**arguments)
         else:
             return {"error": f"Unknown tool: {name}"}
 
@@ -118,6 +174,62 @@ class GovDocMCPServer:
                             "level": level,
                             "count": len(sites),
                             "sites": sites
+                        }, ensure_ascii=False, indent=2)
+                    }
+                ]
+            }
+        except Exception as e:
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({"error": str(e)}, ensure_ascii=False)
+                    }
+                ],
+                "isError": True
+            }
+
+    def _fetch_gov_doc_detail(self, url, base_url='', use_cffi=False, need_js=False):
+        try:
+            # 优先用 UnifiedFetcher(支持 cffi + js)
+            from unified_fetcher import UnifiedFetcher
+            if not hasattr(self, '_unified') or self._unified is None:
+                self._unified = UnifiedFetcher()
+            detail = self._unified.fetch_detail(url, base_url, use_cffi=use_cffi, need_js=need_js)
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(detail, ensure_ascii=False, indent=2)
+                    }
+                ]
+            }
+        except Exception as e:
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({"error": str(e)}, ensure_ascii=False)
+                    }
+                ],
+                "isError": True
+            }
+
+    def _fetch_gov_docs_with_details(self, site_key, level="national", limit=5):
+        try:
+            from unified_fetcher import UnifiedFetcher
+            if not hasattr(self, '_unified') or self._unified is None:
+                self._unified = UnifiedFetcher()
+            items = self._unified.fetch_list_with_details(site_key, level, limit=limit)
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({
+                            "site_key": site_key,
+                            "level": level,
+                            "fetched_details": limit,
+                            "items": items
                         }, ensure_ascii=False, indent=2)
                     }
                 ]

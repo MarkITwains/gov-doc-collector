@@ -4,6 +4,68 @@
 
 ---
 
+## v1.5.0 — 2026-06-11
+
+**主题**: 详情页正文提取 + 结构化政策数据
+
+### 关键改动
+
+1. **详情页正文提取器** (`scripts/detail_extractor.py`)
+   - 30+ 正文容器候选选择器(TRS_Editor / article-content / zoom / UCAP-CONTENT / main / body 等)
+   - 优先选**特定**容器,只在都失败时 fallback 到 body(避免选中 nav/侧边栏)
+   - 噪声清洗:移除 `<script>`/`<nav>`/`<header>`/`<footer>`/侧边栏等
+   - 段落保留(`<p>/<h1-h4>` 转 `\n\n`)
+
+2. **元数据提取**
+   - 发文字号正则:`国发〔2024〕12号` / `财建〔2026〕137号` / `第xxx号`
+   - 发文日期正则:从"成文日期/发布日期/印发日期"等 label 附近提取 `YYYY-MM-DD`
+   - 索引号、主题分类、发文机关(从 `<meta name="author">` 等)
+
+3. **附件提取**
+   - 自动从正文里抽 `<a href="*.pdf|*.doc|*.docx|*.xls|*.xlsx|*.zip|*.rar">`
+   - 自动绝对化 URL(基于 base_url 或详情页 URL)
+   - 去重
+
+4. **`UnifiedFetcher.fetch_detail()` 集成**
+   - 三级降级复用:cffi → Playwright → plain requests
+   - `fetch_list_with_details(site, level, limit=5)` 一步到位
+
+5. **`GovDocFetcher.fetch_detail()` 升级**
+   - 原返回 HTML 字符串 → 现返回结构化 dict
+   - 兼容老调用方返回 `{'content_text': ..., ...}`
+
+6. **MCP Server 暴露 2 个新工具**
+   - `fetch_gov_doc_detail(url, base_url, use_cffi, need_js)`
+   - `fetch_gov_docs_with_details(site_key, level, limit)`
+
+### 自测数据(moj 司法部)
+
+| 字段 | 值 |
+|---|---|
+| 字数 | 9030 |
+| 发文日期 | 2021-02-28 |
+| 附件 | 0(求是文章无附件) |
+| 容器 | `div.TRS_Editor` |
+
+### 自测数据(财政部)
+
+| 字段 | 值 |
+|---|---|
+| 字数 | 3576 |
+| 发文字号 | 财建〔2026〕137号 |
+| 发文日期 | 2026-06-10 |
+| 附件 | 0(印发通知型) |
+| 容器 | `div.TRS_Editor` |
+
+### 使用场景
+
+- **政策监控**:采集列表 + 关键政策详情(自动告警关键词)
+- **政策汇总报告**:批量抓详情,生成结构化数据集
+- **关键词搜索**:在正文(非标题)里搜关键词
+- **附件下载**:拿到 PDF/DOC 直链,后续下载入库
+
+---
+
 ## v1.4.0 — 2026-06-11
 
 **主题**: 大规模配置修复 + 反爬虫能力补全

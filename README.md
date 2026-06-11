@@ -10,17 +10,19 @@
 - ✅ **三级采集策略自动降级**:`curl_cffi` → `Playwright` → `requests`
 - ✅ **Playwright JS 渲染**:支持动态加载和 iframe 嵌套
 - ✅ **curl_cffi 浏览器指纹**:绕过 TLS 指纹检测的 WAF
+- ✅ **详情页正文提取**:发文字号/发文日期/附件/正文(30+ 容器选择器)
 - ✅ **XML / JSON / HTML** 多格式解析
 - ✅ **MCP Server 接口**:可接入 Claude / Hermes / 其他 Agent
 
-## 📊 当前状态 (v1.4.0)
+## 📊 当前状态 (v1.5.0)
 
 | 指标 | 数值 |
 |---|---|
 | 配置站点 | 61 |
 | 完整可用 (UnifiedFetcher) | **50/61 (82%)** |
 | 基础可用 (plain requests) | 44/61 (72%) |
-| 总记录数 | 3380 条真实政策 |
+| 列表记录 | 3380 条真实政策 |
+| 详情提取 | 30+ 容器选择器,自动元数据 + 附件 |
 
 ### 国家部委 (22/30 可用)
 
@@ -61,6 +63,22 @@ items = fetcher.fetch_list('ndrc', 'national')
 for item in items[:5]:
     print(f"[{item['date']}] {item['title']}")
 
+# 抓详情页正文(发文字号/发文日期/附件/正文)
+detail = fetcher.fetch_detail(
+    'http://www.moj.gov.cn/pub/sfbgw/qmyfzg/202103/t20210331_349128.html',
+    base_url='http://www.moj.gov.cn'
+)
+print(f"字数: {detail['word_count']}")
+print(f"发文字号: {detail['metadata'].get('doc_number')}")
+print(f"附件: {detail['attachments']}")
+print(detail['content_text'][:200])
+
+# 一步到位:列表+前N条详情
+items = fetcher.fetch_list_with_details('mof', 'national', limit=3)
+for it in items[:3]:
+    d = it.get('detail', {})
+    print(f"{it['title']}  字:{d.get('word_count')}  号:{d.get('metadata',{}).get('doc_number')}")
+
 fetcher.close()
 ```
 
@@ -93,8 +111,10 @@ python scripts/test_js_rendering.py
 ```
 
 可用工具:
-- `fetch_gov_docs` — 采集指定站点文档
+- `fetch_gov_docs` — 采集指定站点列表
 - `list_available_sites` — 列出可用站点
+- `fetch_gov_doc_detail` — 抓取指定政策详情页(发文字号/发文日期/附件/正文)
+- `fetch_gov_docs_with_details` — 列表+前 N 条详情,端到端
 
 ## 🏗️ 架构
 
@@ -170,7 +190,7 @@ hermes_agent/
 - **TCP RST / 超时** (4 站):金融监管总局、青海、广西、水利部 — 网络级封禁,需要代理
 - **Cloudflare JS Challenge** (1 站):公安部 — 需要完整 JS Challenge 解决
 - **选择器不稳定** (3 站):审计署、人社部、湖南 — Playwright 偶发时序问题
-- **只采列表页**:不提取详情页正文
+- **只采列表页**:v1.5.0 起支持详情正文提取
 
 详见 [DIAGNOSIS_REPORT.md](DIAGNOSIS_REPORT.md) 根因分析。
 
