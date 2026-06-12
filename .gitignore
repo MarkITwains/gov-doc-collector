@@ -34,3 +34,5 @@ scripts/debug_*.html
 
 # 数据缓存(保留示例文件)
 scripts/diagnose_results.json
+# 临时采集快照(2.4MB,可在本地用 gov-doc-collector 重跑)
+scripts/detail_*.json
