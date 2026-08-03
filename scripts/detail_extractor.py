@@ -64,19 +64,22 @@ NOISE_SELECTORS = [
     'div.sidebar', 'div.side', 'div.aside',
     'div.nav', 'div.menu', 'div.breadcrumb',
     'div.share', 'div.tool', 'div.tools',
-    'div.print', 'div.attachment-list',  # 附件区单独抽
+    'div.print', 'div.attachment-list',  # 附件区单独抽(见 extract_detail)
     'div.related', 'div.recommend',
     'div#sidebar', 'div#side', 'div#nav',
     'form', 'button',
 ]
 
+# 独立附件区容器:在噪声清洗 decompose 之前先把链接抽出来
+ATTACHMENT_SELECTORS = ['div.attachment-list', 'div.attachment', 'div#attachment',
+                        'div.attach', 'div.fujian', 'ul.attachment']
+
 # 元数据正则
-DOC_NUMBER_RE = re.compile(
-    r'[(（]\s*[\d]{4}[-—年][\d]{1,2}[-—月]?[\d]{0,2}[号日]?\s*[)）]'
-)
-YEAR_NUMBER_RE = re.compile(r'[（(](\d{4})[）)]')
 ISSUE_DATE_RE = re.compile(r'(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})[日]?')
 KEYWORDS_OF_DATE = ['成文日期', '发布日期', '发文日期', '印发日期', '发布时间']
+
+# 块级元素(正文按最内层块级元素收集,见 _extract_text)
+BLOCK_TAGS = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'li']
 
 
 def _strip_noise(soup: BeautifulSoup) -> None:
@@ -129,7 +132,12 @@ def _find_content_root(soup: BeautifulSoup) -> Optional[Tag]:
 
 
 def _extract_text(root: Tag) -> str:
-    """从正文容器提取干净文本(保留段落结构)"""
+    """从正文容器提取干净文本(保留段落结构)。
+
+    以**最内层**块级元素为收集单元:仍包含块级子元素的节点跳过,
+    避免嵌套容器(如 div#content > div.TRS_Editor > p)被重复收集,
+    导致正文翻倍、word_count 虚高。
+    """
     if not root:
         return ""
 
@@ -138,10 +146,17 @@ def _extract_text(root: Tag) -> str:
         br.replace_with('\n')
 
     paragraphs = []
-    for elem in root.find_all(['p', 'div', 'h1', 'h2', 'h3', 'h4', 'li']):
+    for elem in root.find_all(BLOCK_TAGS):
+        if elem.find(BLOCK_TAGS):
+            continue  # 内层块级元素会单独收集,跳过外层避免重复
         text = elem.get_text(' ', strip=True)
         if text and len(text) >= 2:
             paragraphs.append(text)
+
+    # 兜底:正文容器没有任何块级子元素(纯文本节点)→ 整体取
+    if not paragraphs:
+        text = root.get_text('\n', strip=True)
+        return re.sub(r'\n{3,}', '\n\n', text).strip()
 
     # 合并:相邻短句合并为段
     text = '\n\n'.join(paragraphs)
@@ -270,6 +285,12 @@ def extract_detail(html: str, url: str, base_url: str = '') -> Dict:
         }
 
     soup = BeautifulSoup(html, 'html.parser')
+    base = base_url or url.rstrip('/').rsplit('/', 1)[0] + '/'
+    # 独立附件区会被 _strip_noise decompose 掉,先抽出附件链接
+    pre_attachments = []
+    for sel in ATTACHMENT_SELECTORS:
+        for el in soup.select(sel):
+            pre_attachments.extend(_extract_attachments(el, base))
     _strip_noise(soup)
     root = _find_content_root(soup)
     if not root:
@@ -279,14 +300,19 @@ def extract_detail(html: str, url: str, base_url: str = '') -> Dict:
             'content_text': text,
             'content_html': html,
             'word_count': len(text),
-            'attachments': [],
+            'attachments': pre_attachments,
             'metadata': _extract_metadata(html, soup),
             'has_content': False,
         }
 
     content_text = _extract_text(root)
-    base = base_url or url.rstrip('/').rsplit('/', 1)[0] + '/'
-    attachments = _extract_attachments(root, base)
+    attachments = _extract_attachments(root, base) + pre_attachments
+    # 跨容器去重(保持顺序)
+    seen, uniq = set(), []
+    for a in attachments:
+        if a['url'] not in seen:
+            seen.add(a['url'])
+            uniq.append(a)
     metadata = _extract_metadata(html, soup)
 
     return {
@@ -294,7 +320,7 @@ def extract_detail(html: str, url: str, base_url: str = '') -> Dict:
         'content_text': content_text,
         'content_html': str(root)[:200000],  # 截断超大
         'word_count': len(content_text),
-        'attachments': attachments,
+        'attachments': uniq,
         'metadata': metadata,
         'has_content': len(content_text) >= 100,
     }

@@ -12,16 +12,27 @@
 - review  语义条件(行业契合等) → 交给上层 Agent 复核
 """
 import json
+import logging
 import re
+from datetime import date
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+# 兼容包内导入与直接脚本执行两种场景
+try:
+    from .policy_parser import parse_policy  # noqa: F401  (包内相对导入)
+except ImportError:  # 直接以脚本方式运行时回退
+    from policy_parser import parse_policy  # type: ignore  # noqa: F401
 
 # 企业画像 schema(所有字段可选;字段越全,结论越确定)
 PROFILE_SCHEMA = {
     'name': '企业名称 (str)',
     'region': '注册地,如 "深圳市南山区" (str)',
     'industry': '所属行业/主营业务,如 "工业软件研发" (str)',
-    'company_age': '成立年限,年 (float)',
+    'company_age': '成立年限,年 (float);与 established 二选一',
     'established': '成立日期 "YYYY-MM-DD",有则自动算 company_age (str)',
+    'as_of': '计算成立年限的基准日期 "YYYY-MM-DD",缺省取当天 (str)',
     'revenue': '上年度营业收入,万元 (float)',
     'headcount': '从业人员数 (int)',
     'registered_capital': '注册资本,万元 (float)',
@@ -49,6 +60,48 @@ QUAL_ALIASES = {
     '中型企业': ['中小企业', '中型', '中企业'],
     '科技型中小企业': ['科技型小微企业', '科小企业', '科技企业'],
 }
+
+# ---------- 属地推断(省级/直辖市 + 主要地级市→省映射) ----------
+PROVINCE_NAMES = [
+    '北京', '天津', '上海', '重庆',
+    '河北', '山西', '辽宁', '吉林', '黑龙江', '江苏', '浙江', '安徽',
+    '福建', '江西', '山东', '河南', '湖北', '湖南', '广东', '海南',
+    '四川', '贵州', '云南', '陕西', '甘肃', '青海',
+    '内蒙古', '广西', '西藏', '宁夏', '新疆',
+]
+CITY_TO_PROVINCE = {
+    '深圳': '广东', '广州': '广东', '珠海': '广东', '佛山': '广东', '东莞': '广东',
+    '杭州': '浙江', '宁波': '浙江', '温州': '浙江',
+    '南京': '江苏', '苏州': '江苏', '无锡': '江苏',
+    '成都': '四川', '武汉': '湖北', '长沙': '湖南', '郑州': '河南',
+    '济南': '山东', '青岛': '山东', '厦门': '福建', '福州': '福建',
+    '合肥': '安徽', '南昌': '江西', '太原': '山西', '石家庄': '河北',
+    '沈阳': '辽宁', '大连': '辽宁', '长春': '吉林', '哈尔滨': '黑龙江',
+    '昆明': '云南', '贵阳': '贵州', '南宁': '广西', '海口': '海南',
+    '兰州': '甘肃', '西宁': '青海', '西安': '陕西', '银川': '宁夏',
+    '乌鲁木齐': '新疆', '拉萨': '西藏', '呼和浩特': '内蒙古',
+}
+
+
+def _policy_regions(text: str) -> set:
+    """从政策发文机关/标题中识别辖区名(省份、直辖市、主要城市)。"""
+    found = set()
+    for n in PROVINCE_NAMES:
+        if n in text:
+            found.add(n)
+    for c in CITY_TO_PROVINCE:
+        if c in text:
+            found.add(c)
+    return found
+
+
+def _profile_provinces(region: str) -> set:
+    """从画像注册地解析所属省份集合(直接含省名,或经城市映射)。"""
+    provs = {n for n in PROVINCE_NAMES if n in region}
+    for city, prov in CITY_TO_PROVINCE.items():
+        if city in region:
+            provs.add(prov)
+    return provs
 
 
 def _has_qual(profile_quals: List[str], wanted: str) -> bool:
@@ -80,23 +133,43 @@ def _company_age(profile: Dict) -> Optional[float]:
     if profile.get('company_age') is not None:
         return float(profile['company_age'])
     est = profile.get('established')
-    if est:
-        m = re.match(r'(\d{4})-(\d{1,2})-(\d{1,2})', str(est))
-        if m:
-            # 以解析时传入的 as_of 为准;缺省按 profile['as_of'] 或不算
-            as_of = profile.get('as_of')
-            if as_of:
-                m2 = re.match(r'(\d{4})-(\d{1,2})-(\d{1,2})', str(as_of))
-                if m2:
-                    days = (int(m2.group(1)) - int(m.group(1))) * 365 + \
-                           (int(m2.group(2)) - int(m.group(2))) * 30 + \
-                           (int(m2.group(3)) - int(m.group(3)))
-                    return round(days / 365.0, 2)
-    return None
+    if not est:
+        return None
+    m = re.match(r'(\d{4})-(\d{1,2})-(\d{1,2})', str(est))
+    if not m:
+        logger.warning('established 格式无法解析: %s', est)
+        return None
+    try:
+        born = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        logger.warning('established 非法日期: %s', est)
+        return None
+    # as_of 缺省取当天;支持 profile 显式传入基准日(便于复现/测试)
+    as_of = profile.get('as_of')
+    if as_of:
+        m2 = re.match(r'(\d{4})-(\d{1,2})-(\d{1,2})', str(as_of))
+        if m2:
+            try:
+                ref = date(int(m2.group(1)), int(m2.group(2)), int(m2.group(3)))
+            except ValueError:
+                ref = date.today()
+        else:
+            ref = date.today()
+    else:
+        ref = date.today()
+    days = (ref - born).days
+    if days < 0:
+        logger.warning('established 晚于基准日期,company_age=0 (est=%s, as_of=%s)', est, ref)
+        return 0.0
+    return round(days / 365.0, 2)
 
 
-def check_condition(cond: Dict, profile: Dict) -> Dict:
-    """单条结构化条件 vs 企业画像 → {status, reason}"""
+def check_condition(cond: Dict, profile: Dict, context: Optional[Dict] = None) -> Dict:
+    """单条结构化条件 vs 企业画像 → {status, reason}
+
+    Args:
+        context: 政策上下文 {'issuer', 'title'},用于属地条件推断辖区
+    """
     field = cond.get('field')
     op = cond.get('op')
     value = cond.get('value')
@@ -116,8 +189,11 @@ def check_condition(cond: Dict, profile: Dict) -> Dict:
         if quals is None:
             return {'status': 'unknown', 'reason': '画像缺少 qualifications'}
         wanted = value if isinstance(value, list) else [value]
-        # 条件文本含"或"→任一命中;否则全部命中
-        any_mode = '或' in (cond.get('value_text') or '')
+        # 条件含"或"→任一命中;否则全部命中。优先取 classify_condition 标注的 any_mode,
+        # 兼容旧数据时回退到 value_text 中是否含"或"
+        any_mode = cond.get('any_mode')
+        if any_mode is None:
+            any_mode = '或' in (cond.get('value_text') or '')
         hits = [w for w in wanted if _has_qual(quals, w)]
         ok = bool(hits) if any_mode else len(hits) == len(wanted)
         if ok:
@@ -137,10 +213,49 @@ def check_condition(cond: Dict, profile: Dict) -> Dict:
         region = profile.get('region')
         if not region:
             return {'status': 'unknown', 'reason': '画像缺少 region'}
-        # "本市/本省"无法仅凭文本确定是哪个市 → 需结合政策发文机关
+        # 用发文机关/标题推断政策辖区;能确定且画像可解析 → 给出确定结论,
+        # 否则保持 review 交给上层复核
+        ctx_text = ' '.join(filter(
+            None, [(context or {}).get('issuer'), (context or {}).get('title')]))
+        pol_regions = _policy_regions(ctx_text) if ctx_text else set()
+        cond_desc = (cond.get('value_text') or cond.get('text', ''))[:30]
+        if not pol_regions:
+            return {'status': 'review',
+                    'reason': f"属地条件「{cond_desc}」,发文机关未识别出辖区,"
+                              f"需确认企业注册地({region})是否在辖区内"}
+
+        pol_provs = {p for p in pol_regions if p in PROVINCE_NAMES}
+        pol_cities = {c for c in pol_regions if c in CITY_TO_PROVINCE}
+        prof_provs = _profile_provinces(region)
+        prof_cities = {c for c in CITY_TO_PROVINCE if c in region}
+
+        if pol_cities:
+            # 市级政策:注册城市命中才算通过
+            hit = pol_cities & prof_cities
+            if hit:
+                return {'status': 'pass',
+                        'reason': f"属地匹配:政策限「{'、'.join(sorted(hit))}」,"
+                                  f"企业注册地 {region}"}
+            if prof_cities:
+                return {'status': fail_status(),
+                        'reason': f"属地不符:政策限「{'、'.join(sorted(pol_cities))}」,"
+                                  f"企业注册地 {region}"}
+            return {'status': 'review',
+                    'reason': f"属地条件「{cond_desc}」(政策限{'、'.join(sorted(pol_cities))}),"
+                              f"画像 region({region})未识别出城市,需人工确认"}
+        # 省级政策:画像省份(直接含省名或城市→省映射)命中即通过
+        hit = pol_provs & prof_provs
+        if hit:
+            return {'status': 'pass',
+                    'reason': f"属地匹配:政策限「{'、'.join(sorted(hit))}」,"
+                              f"企业注册地 {region}"}
+        if prof_provs:
+            return {'status': fail_status(),
+                    'reason': f"属地不符:政策限「{'、'.join(sorted(pol_provs))}」,"
+                              f"企业注册地 {region}"}
         return {'status': 'review',
-                'reason': f"属地条件「{cond.get('value_text') or cond.get('text', '')[:30]}」,"
-                          f"需确认企业注册地({region})是否属于发文机关辖区"}
+                'reason': f"属地条件「{cond_desc}」(政策限{'、'.join(sorted(pol_provs))}),"
+                          f"画像 region({region})未识别出省份,需人工确认"}
 
     if field == 'company_age':
         age = _company_age(profile)
@@ -172,30 +287,30 @@ def check_condition(cond: Dict, profile: Dict) -> Dict:
 
 def _or_group_rescue(checks: List[Dict]) -> None:
     """
-    同一条文本拆出的多条条件,若原文含"或",其中一条 pass 即可整组 pass。
+    同一条文本拆出的多条条件,若原文含"或/或者",其中一条 pass 即可整组 pass。
     原地把同组其余 fail → pass(标注 reason)。
+
+    判定依据优先取 classify_condition 标注的 any_mode,兼容旧数据回退到 text 含"或"。
     """
     by_text: Dict[str, List[Dict]] = {}
     for c in checks:
         by_text.setdefault(c['condition']['text'], []).append(c)
     for text, group in by_text.items():
-        if len(group) < 2 or '或' not in text:
+        if len(group) < 2:
+            continue
+        # 任一条件标注 any_mode 即视为"或"组
+        is_or_group = any(g['condition'].get('any_mode') for g in group) or '或' in text
+        if not is_or_group:
             continue
         if any(g['result']['status'] == 'pass' for g in group):
+            rescued = 0
             for g in group:
                 if g['result']['status'] in ('fail', 'soft_fail'):
                     g['result']['status'] = 'pass'
                     g['result']['reason'] += '(同条款"或"关系,另一分支已满足)'
-
-
-# 适用于"申报类"政策的文种(其他文种是法/规划/招聘/吹风会等,不做 triage)
-TRIAGE_DOC_TYPES = {'通知', '公告', '办法', '细则', '意见', '方案', '规定', '决定',
-                    '指南', '目录', '措施', '规则', '管理办法', '实施细则', '行动方案',
-                    '实施方案', '指导意见', '实施意见', '若干措施', '若干政策', '行动计划',
-                    '工作要点', '规划', '法', '条例'}  # 法/条例常含具体条款,也可 triage
-
-# 不适合做"申报分流"的文种
-NON_TRIAGE_DOC_TYPES = set()  # 由 caller 判定
+                    rescued += 1
+            if rescued:
+                logger.debug('"或"关系救援: %d 条 fail→pass (text=%s)', rescued, text[:40])
 
 
 def match_policy(parsed_policy: Dict, profile: Dict) -> Dict:
@@ -213,7 +328,11 @@ def match_policy(parsed_policy: Dict, profile: Dict) -> Dict:
       }
     """
     conditions = parsed_policy.get('conditions', [])
-    checks = [{'condition': c, 'result': check_condition(c, profile)} for c in conditions]
+    # 属地条件推断需要政策上下文(发文机关/标题)
+    context = {'issuer': parsed_policy.get('issuer'),
+               'title': parsed_policy.get('title')}
+    checks = [{'condition': c, 'result': check_condition(c, profile, context)}
+              for c in conditions]
     _or_group_rescue(checks)
 
     summary = {'pass': 0, 'fail': 0, 'soft_fail': 0, 'unknown': 0, 'review': 0}
@@ -246,6 +365,11 @@ def match_policy(parsed_policy: Dict, profile: Dict) -> Dict:
 
     total = max(1, len(checks))
     score = round(100.0 * (summary['pass'] + 0.5 * summary['soft_fail']) / total, 1)
+
+    logger.debug('匹配完成: verdict=%s score=%s pass=%d fail=%d unknown=%d review=%d (title=%s)',
+                 verdict, score, summary['pass'], summary['fail'],
+                 summary['unknown'], summary['review'],
+                 parsed_policy.get('title', '')[:40])
 
     return {
         'policy_title': parsed_policy.get('title'),
@@ -299,6 +423,15 @@ def format_report(match: Dict) -> str:
         lines.append(f"- 发文字号: {match['doc_number']}")
     if match.get('deadline'):
         lines.append(f"- 申报截止: **{match['deadline']}**")
+        # 截止时间感知:已过期明确提示,避免对着失效政策做申报准备
+        m = re.match(r'(\d{4})-(\d{1,2})-(\d{1,2})', str(match['deadline']))
+        if m:
+            try:
+                dl = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                if dl < date.today():
+                    lines.append(f"- ⚠️ **已过申报截止日 {(date.today() - dl).days} 天,本期不可申报**")
+            except ValueError:
+                pass
     if match.get('triage_category'):
         tc = match['triage_category']
         cat_label = {'apply': '申报/资助类', 'regulate': '规范类(法/条例)',
@@ -338,11 +471,9 @@ def format_report(match: Dict) -> str:
 
 if __name__ == '__main__':
     import sys
-    from pathlib import Path
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
-    sys.path.insert(0, str(Path(__file__).parent))
-    from policy_parser import parse_policy
+    # parse_policy 已在模块顶部导入(兼容包内/脚本两种运行方式)
 
     sample_policy = """市工信局关于组织申报2026年度专精特新中小企业培育资助的通知
 

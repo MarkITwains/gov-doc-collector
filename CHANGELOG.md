@@ -4,6 +4,91 @@
 
 ---
 
+## v1.7.0 — 2026-08-03
+
+**主题**: 数据质量(P1)+ 新功能:分页、增量监控、属地推断
+
+### gov-doc-collector
+
+1. **编码自动检测**(B7):header charset → `<meta charset>` → utf-8 严格解码探测
+   → gb18030 兜底;不再硬编码 utf-8,GBK/GB2312 老 TRS 站点不再产出乱码标题
+2. **TLS 安全优先 + 自动降级**(B9):默认先校验证书,证书链损坏的站点
+   自动降级 verify=False 并打 warning(可配 `verify_ssl: false` 强制关闭);
+   不再是全局静默不校验
+3. **分页采集**(F2):站点配置新增 `pagination`(`template` / `query` 两种模式,
+   `{page}` 占位 + `max_pages`),`fetch_list(..., max_pages=N)` 覆盖;
+   跨页按 link 去重、空页即停
+4. **增量监控**(F3):新增 `seen_store.SeenStore`(JSON 持久化、按站点隔离、
+   批次内去重、超限淘汰);`UnifiedFetcher.fetch_list_new()` 只报新政策;
+   MCP 新增 `fetch_new_gov_docs` 工具,cron 场景开箱即用
+5. **详情并发抓取**(F4):`fetch_list_with_details` 线程池并发(默认 4 worker,
+   每 worker 独立会话);need_js 站点自动降串行(Playwright 非线程安全)
+6. **JSON API 解析增强**(B10):`items_path`/字段路径支持数组下标
+   (`result[0].list`),路径缺失/类型不匹配返回空而不是崩溃
+7. **标题过滤与日期归一化**(B11):阈值 >10 放宽为 >=6 且可按站点
+   `min_title_len` 配置;列表日期统一归一化为 ISO `YYYY-MM-DD`
+   (支持 2026年6月10日 / RFC822 / ISO 等 7 种格式)
+8. **采集器加 logging**(F8):策略降级、重试、失败不再静默吞掉
+9. **仓库卫生**:删除被 unified_fetcher 取代的遗留文件
+   (enhanced/hybrid/js_fetcher + 3 个一次性测试脚本)
+
+### policy-analyzer (v1.4.0)
+
+10. **属地条件推断**(F6):用发文机关/标题识别政策辖区(31 省 + 直辖市 +
+    36 个主要地级市→省映射),画像注册地可解析时直接给出 pass/fail;
+    市级政策跨城 → fail,省级政策同省(含城市映射)→ pass,无法判定仍 review
+11. **截止时间感知**(F5):报告对已过申报截止日的政策明确标注
+    "⚠️ 已过申报截止日 N 天"
+12. **triage_method 标签修复**(B8):标记实际产出结果的路径,
+    LLM 超时回退规则时不再误标 'llm'
+
+### 质量保障
+
+13. 回归测试扩充到 **36 用例**(编码/JSON 路径/日期/标题过滤/分页/增量缓存/
+    属地推断/截止日/triage 标签),全部离线可跑
+
+---
+
+## v1.6.0 — 2026-08-03
+
+**主题**: 修复 6 个已复现核心 bug + MCP Server 改为官方协议实现
+
+### gov-doc-collector
+
+1. **MCP Server 重写为官方 mcp SDK(FastMCP)实现** (`scripts/mcp_server.py`)
+   - 旧版是自研逐行 JSON 读写器:无 initialize 握手、响应无 JSON-RPC 2.0 封装,
+     **实际无法被任何 MCP 客户端接入**;现由 SDK 完整接管协议层
+   - 修复工具间采集器不一致:`fetch_gov_docs` 原先走基础 GovDocFetcher(纯 requests,
+     无视 need_js/use_cffi 配置),现全部统一走 UnifiedFetcher 三级策略
+   - requirements.txt 新增 `mcp>=1.2.0`
+
+2. **修复 README 宣称的导入路径报错**:新增 `scripts/__init__.py`,
+   fetcher/unified_fetcher/mcp_server 改为 try 相对导入 + 平铺回退,
+   `from scripts.unified_fetcher import UnifiedFetcher` 在仓库根目录可用,
+   `python scripts/xxx.py` 直接执行也兼容
+
+3. **修复 RSS/XML feed 链接全丢** (`scripts/parser.py`)
+   - `parse_xml_feed` 三元表达式优先级 bug:非 Atom 条目 link 恒为 None
+   - RSS `<link>` 文本与 Atom `<link href>` 属性现在都正确提取
+
+4. **修复详情页嵌套 div 正文重复 2~3 倍** (`scripts/detail_extractor.py`)
+   - `_extract_text` 改为只收集**最内层**块级元素,word_count 不再虚高
+   - 修复独立附件区(div.attachment-list)被噪声清洗 decompose 后附件丢失
+
+### policy-analyzer (v1.3.1)
+
+5. **修复申报条件跨章节污染**(结论级错误)
+   - "支持标准/支持内容/支持方式/支持范围"等资金章节不再被当条件块收集,
+     收集循环加 block_added 边界,描述段不再跨块拼接到上一块最后一条
+   - 修复前:资金描述("获评专精特新小巨人...补助")被误判为资质要求,产生假 fail
+
+### 质量保障
+
+6. 新增 `scripts/test_regressions.py`:12 个离线回归测试(含真实 MCP 协议握手测试),
+   pytest / unittest 均可运行,固化以上全部修复
+
+---
+
 ## v1.5.0 — 2026-06-11
 
 **主题**: 详情页正文提取 + 结构化政策数据

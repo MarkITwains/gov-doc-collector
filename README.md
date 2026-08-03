@@ -14,7 +14,7 @@
 - ✅ **XML / JSON / HTML** 多格式解析
 - ✅ **MCP Server 接口**:可接入 Claude / Hermes / 其他 Agent
 
-## 📊 当前状态 (v1.5.0)
+## 📊 当前状态 (v1.7.0)
 
 | 指标 | 数值 |
 |---|---|
@@ -88,14 +88,17 @@ fetcher.close()
 # 全站诊断
 python scripts/diagnose_sites.py
 
+# 离线回归测试(12 用例,含 MCP 协议握手)
+python scripts/test_regressions.py
+
 # 最终测试
 python scripts/test_final.py
-
-# JS 渲染测试
-python scripts/test_js_rendering.py
 ```
 
 ### MCP Server
+
+基于官方 [mcp SDK](https://pypi.org/project/mcp/)(FastMCP,stdio 传输),
+实现标准 MCP JSON-RPC 2.0 协议,可被 Claude Code / Claude Desktop 等客户端直接接入。
 
 配置 `.claude/mcp_server_config.json`:
 
@@ -111,7 +114,8 @@ python scripts/test_js_rendering.py
 ```
 
 可用工具:
-- `fetch_gov_docs` — 采集指定站点列表
+- `fetch_gov_docs` — 采集指定站点列表(支持 `max_pages` 翻页)
+- `fetch_new_gov_docs` — 增量采集,只返回上次之后的新政策(政策监控)
 - `list_available_sites` — 列出可用站点
 - `fetch_gov_doc_detail` — 抓取指定政策详情页(发文字号/发文日期/附件/正文)
 - `fetch_gov_docs_with_details` — 列表+前 N 条详情,端到端
@@ -172,7 +176,16 @@ hermes_agent/
       "date": "span"            // 日期元素
     },
     "use_cffi": true,           // 可选: 启用 curl_cffi
-    "need_js": true             // 可选: 启用 Playwright
+    "need_js": true,            // 可选: 启用 Playwright
+    "verify_ssl": false,        // 可选: 强制关闭 TLS 校验(默认自动降级)
+    "min_title_len": 6,         // 可选: 标题最短长度过滤(默认 6)
+    "pagination": {             // 可选: 分页配置
+      "type": "template",                     // template 或 query
+      "url_template": "/list/index_{page}.html",  // template 模式
+      "param": "page",                        // query 模式的参数名
+      "start": 1,                             // 第 2 页起代入的页码
+      "max_pages": 3                          // 最多翻页数
+    }
   }
 }
 ```

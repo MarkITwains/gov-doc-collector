@@ -1,9 +1,19 @@
 ---
 name: gov-doc-collector
 description: 采集国家部委和省级政府网站的政策文档和公告
-version: 1.3.0
+version: 1.7.0
 author: Hermes Team
-tags: [政府, 政策, 采集, 爬虫]
+metadata:
+  hermes:
+    tags: [政府, 政策, 采集, 爬虫, gov, crawler]
+    category: collection
+    requires_toolsets: [terminal]
+    fallback_for_tools: []
+    config:
+      - key: gov_doc_collector.timeout
+        description: 单站点请求超时秒数
+        default: "30"
+        prompt: 采集单站点的 HTTP 超时,默认 30 秒
 ---
 
 # 政府文档采集器 (gov-doc-collector)
@@ -26,13 +36,13 @@ gov-doc-collector 是一个专门用于采集中国政府官网和政务公开�
 
 ## 已支持站点
 
-### 国家级 (25/30 可用)
+### 国家级 (22/30 可用)
 
 成功采集~1600条政策记录，**新增**: 工信部、人社部
 
 详见 [docs/MINISTRIES.md](../docs/MINISTRIES.md)
 
-### 省级 (19/31 可用)
+### 省级 (24/31 可用)
 
 成功采集~1946条政策记录，**新增**: 江西省、重庆市
 
@@ -48,7 +58,7 @@ gov-doc-collector 是一个专门用于采集中国政府官网和政务公开�
 - **可用**: 50/61 站点 **(82%)** (UnifiedFetcher 完整能力)
 - **基础可用**: 44/61 (72%) (仅 plain requests)
 - **记录**: 3380 条政策
-- **版本**: v1.4.0 (2026-06-11)
+- **版本**: v1.7.0 (2026-08-03)
 
 ## 使用方法
 
@@ -108,11 +118,11 @@ for item in items[:3]:
 ### 3. 命令行
 
 ```bash
+# 离线回归测试(12 用例,含 MCP 协议握手)
+python scripts/test_regressions.py
+
 # 最终测试
 python scripts/test_final.py
-
-# JS渲染测试
-python scripts/test_js_rendering.py
 
 # 站点诊断
 python scripts/diagnose_sites.py
@@ -167,6 +177,15 @@ python scripts/diagnose_sites.py
   "site_key": "mof",
   "level": "national",
   "limit": 3
+}
+```
+
+**fetch_new_gov_docs** - 增量采集,只返回新政策(政策监控,cron 友好)
+```json
+{
+  "site_key": "ndrc",
+  "level": "national",
+  "limit": 20
 }
 ```
 
@@ -242,10 +261,10 @@ python scripts/diagnose_sites.py
 
 ## 测试结果
 
-- **成功率**: 25/30 国家部委 (83%), 19/31 省级 (61%) - 基础级 (plain requests)
+- **基础成功率**: 25/30 国家部委 (83%), 19/31 省级 (61%) - plain requests
 - **完整成功率**: 26/30 国家部委 (87%), 24/31 省级 (77%) - UnifiedFetcher (curl_cffi + Playwright)
 - **总计**: 50/61 站点 (82%), 3380 条政策
-- **测试日期**: 2026-06-11
+- **测试日期**: 2026-07-31
 
 ## 已知限制
 
@@ -253,7 +272,8 @@ python scripts/diagnose_sites.py
 - **TCP RST/超时** (4个): cbirc、qinghai、guangxi、mwr — 网络级封禁,需要代理
 - **Cloudflare JS Challenge** (1个): mps — 需要完整 JS Challenge 解决
 - **选择器不匹配** (3个): cnao、mohrss、hunan — Playwright 偶发不稳定
-- **不支持详情页**: 仅采集列表页，不提取正文内容
+- **详情正文提取**:依赖 30+ 容器选择器,部分站点正文容器不规范时可能为空;
+  v1.5.0 起已支持详情页正文(发文字号/发文日期/附件/正文)
 
 ## 技术架构
 
@@ -299,10 +319,14 @@ playwright install chromium  # ~430MB
 ## 示例场景
 
 ### 政策监控
-定期采集多个部委，监控新政策发布
+定期采集多个部委,监控新政策发布:
+```python
+new_items = fetcher.fetch_list_new('ndrc', 'national')  # 只报新政策(已见链接持久化在 .cache/)
+```
+或经 MCP 调用 `fetch_new_gov_docs`。
 
 ### 政策汇总
-跨部委采集，生成政策动态报告
+跨部委采集,生成政策动态报告
 
 ### 关键词搜索
 在采集结果中过滤特定关键词
@@ -312,12 +336,44 @@ playwright install chromium  # ~430MB
 
 ## 文档
 
-- [FIX_REPORT.md](../FIX_REPORT.md) - 修复报告
 - [README.md](../README.md) - 项目说明
+- [DIAGNOSIS_REPORT.md](../DIAGNOSIS_REPORT.md) - 站点根因分析
 - [docs/MINISTRIES.md](../docs/MINISTRIES.md) - 部委列表
 - [scripts/unified_fetcher.py](../scripts/unified_fetcher.py) - 主采集器
 
 ## 更新日志
+
+### v1.7.0 (2026-08-03)
+- ✨ **分页采集**:站点配置 `pagination`(template/query 两种),`max_pages` 可调,
+  跨页 link 去重、空页即停
+- ✨ **增量监控**:`SeenStore` 已见链接持久化 + `fetch_list_new()` /
+  MCP `fetch_new_gov_docs`,cron 只报新政策
+- ✨ **详情并发抓取**:线程池(默认 4),need_js 站点自动串行
+- 🔧 **编码自动检测**:不再硬编码 utf-8(header/meta/探测/gb18030 兜底)
+- 🔧 **TLS 安全优先**:默认校验证书,证书损坏站点自动降级并告警
+- 🔧 **JSON API 路径支持数组下标**(`result[0].list`),缺失不崩溃
+- 🔧 **日期归一化 ISO + 标题阈值放宽到 6 可配置**
+- 🧹 删除遗留 enhanced/hybrid/js_fetcher 及一次性脚本;采集器加 logging
+- ✅ 回归测试扩充到 36 用例
+
+### v1.6.0 (2026-08-03)
+- 🔧 **MCP Server 改用官方 mcp SDK(FastMCP)**:旧版不说 MCP 协议(无 initialize
+  握手/无 JSON-RPC 封装),实际无法被 MCP 客户端接入;现标准协议,工具签名不变
+- 🔧 **MCP 工具统一走 UnifiedFetcher**:修复 `fetch_gov_docs` 原先无视
+  need_js/use_cffi 配置、JS 站点经 MCP 必失败的问题
+- 🔧 **导入路径修复**:新增 `scripts/__init__.py` + 相对导入回退,
+  `from scripts.unified_fetcher import UnifiedFetcher` 在仓库根目录可用
+- 🐛 **parse_xml_feed 链接丢失修复**:三元表达式优先级 bug,RSS 条目 link 恒为 None
+- 🐛 **详情页正文重复修复**:嵌套 div 不再重复抽取,word_count 不再虚高
+- 🐛 **独立附件区修复**:div.attachment-list 里的附件不再被噪声清洗吞掉
+- ✅ 新增 `scripts/test_regressions.py`(12 个离线回归测试,含 MCP 协议握手)
+
+### v1.5.0 (2026-07-31)
+- ✅ 详情页正文提取落地:`fetch_detail` / `fetch_gov_doc_detail` 支持
+  发文字号/发文日期/附件/正文(30+ 容器选择器)
+- ✅ `fetch_gov_docs_with_details` 端到端:列表 + 前 N 条详情一步到位
+- ✅ frontmatter schema 统一为 `metadata.hermes`(tags/category/requires_toolsets/config)
+- ✅ 文档:删除"不支持详情页"矛盾限制、省级可用数对齐(24/31)、版本号三处统一
 
 ### v1.4.0 (2026-06-11)
 - ✅ 大规模修复 search_path 错误 (23 个部委的首页→真实政策栏目)

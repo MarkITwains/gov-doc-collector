@@ -36,3 +36,5 @@ scripts/debug_*.html
 scripts/diagnose_results.json
 # 临时采集快照(2.4MB,可在本地用 gov-doc-collector 重跑)
 scripts/detail_*.json
+# 增量采集已见链接缓存(SeenStore,本地状态)
+.cache/

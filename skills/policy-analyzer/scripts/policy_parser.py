@@ -9,8 +9,36 @@
 标记 needs_llm_review 交给上层 Agent。
 可直接消费 gov-doc-collector 的 detail 输出(content_text + metadata)。
 """
+import logging
 import re
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+# LLM 分类模块(兼容包内导入与脚本执行)
+try:
+    from .llm_triage import classify_triage_with_llm, is_llm_available
+except ImportError:  # 直接以脚本方式运行时回退
+    try:
+        from llm_triage import classify_triage_with_llm, is_llm_available
+    except ImportError:  # llm_triage 不可用时降级为纯规则
+        classify_triage_with_llm = None  # type: ignore
+        is_llm_available = lambda **kw: False  # type: ignore
+
+# ---------- 可调常量(替代散落的 magic number) ----------
+DEFAULT_MAX_CHARS = 200_000          # 单条政策正文截断长度,避免超大 HTML 拖慢解析
+FUNDING_PRE_WINDOW = 35             # 金额识别向前取的字符窗口
+FUNDING_POST_WINDOW = 25            # 金额识别向后取的字符窗口
+TITLE_MAX_LEN = 80                  # 标题最大长度
+TARGET_TEXT_MAX = 300               # 支持对象文本最大长度
+CONDITION_TEXT_MAX = 200            # 单条条件文本最大长度
+OUTLINE_HEAD_MAX = 80               # 大纲标题行截取长度
+OUTLINE_TITLE_MAX = 60              # 大纲标题最大长度
+MAX_OUTLINE_ITEMS = 60
+MAX_CONDITIONS = 30
+MAX_FUNDING_ITEMS = 20
+MAX_TARGETS = 5
+MAX_APPLICATION_MATERIALS = 15
 
 # ---------- 中文数字 ----------
 CN_DIGITS = {'零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
@@ -45,8 +73,7 @@ def cn_num(s: str) -> Optional[float]:
 # 排序原则: 越长越具体的放前面(否则"通知"会优先于"通知公告"匹配)
 DOC_TYPES = ['管理办法', '实施细则', '行动方案', '实施方案', '指导意见', '实施意见',
              '若干措施', '若干政策', '行动计划', '工作要点', '规划',
-             '管理办法', '实施细则',  # 保底冗余
-             '法', '条例',  # 单字'法'必须靠后,避免误匹配"办法"
+             '法', '条例',  # 单字'法'在 chunk 扫描层被跳过,由 DOC_TYPE_RULES 精确判定
              '通知', '公告', '办法', '细则', '意见', '方案', '规定', '决定',
              '指南', '目录', '措施', '规则']
 
@@ -109,9 +136,10 @@ def detect_doc_type(title: str) -> str:
                     # 保留"立法计划"等,不算"法"
                     return '其他'
                 return name
-    # 通用关键词(已按长度排序, 优先匹配具体词);"办法" → 单字'法' 这种情形已被前面规则处理过
+    # 通用关键词(已按长度排序,优先匹配具体词)。单字'法'同样跳过,
+    # 避免在"执法/法治"等词中间误命中;末尾"X法"由下方兜底正则精确判定
     for t in DOC_TYPES:
-        if not t:
+        if not t or t in ('法',):
             continue
         if t in title:
             return t
@@ -142,17 +170,17 @@ def split_paragraphs(text: str) -> List[str]:
     return [p.strip() for p in re.split(r'\n+', text or '') if p.strip()]
 
 
-def extract_outline(paragraphs: List[str], max_items: int = 60) -> List[Dict]:
+def extract_outline(paragraphs: List[str], max_items: int = MAX_OUTLINE_ITEMS) -> List[Dict]:
     """提取章节大纲(只保留标题行,不含正文)。"""
     outline = []
     for p in paragraphs:
-        head = p[:80]
+        head = p[:OUTLINE_HEAD_MAX]
         for level, pat in SECTION_PATTERNS:
             m = pat.match(head)
             if m:
                 title = (m.group(2) or '').strip()
                 # 标题应当较短;太长说明该段是"编号+整段正文"
-                title = title.split('。')[0][:60]
+                title = title.split('。')[0][:OUTLINE_TITLE_MAX]
                 outline.append({'level': level, 'marker': m.group(1), 'title': title})
                 break
         if len(outline) >= max_items:
@@ -253,13 +281,13 @@ def _norm_amount(value: float, unit: str) -> Optional[float]:
     return None
 
 
-def extract_funding(text: str, max_items: int = 20) -> List[Dict]:
+def extract_funding(text: str, max_items: int = MAX_FUNDING_ITEMS) -> List[Dict]:
     """提取补贴/奖励金额(过滤掉营收/注册资本等阈值类金额)。"""
     out, seen = [], set()
     for m in AMOUNT_RE.finditer(text):
         s, e = m.start(), m.end()
-        pre = text[max(0, s - 35):s]
-        post = text[e:e + 25]
+        pre = text[max(0, s - FUNDING_PRE_WINDOW):s]
+        post = text[e:e + FUNDING_POST_WINDOW]
         if THRESHOLD_PRE_RE.search(pre):
             continue
         # 贷款额度/单户额度 紧邻的金额也算 funding
@@ -309,16 +337,16 @@ def extract_support_targets(paragraphs: List[str]) -> List[str]:
         if head_only:
             if i + 1 < len(paragraphs):
                 # 下一段可能含子条目 → 整体保留前 300 字
-                targets.append(paragraphs[i + 1][:300])
+                targets.append(paragraphs[i + 1][:TARGET_TEXT_MAX])
                 # 如果下一段还含子条目(2. 3. ...), 也保留
                 if i + 2 < len(paragraphs) and re.match(r'^\d{1,2}[.、]', paragraphs[i + 2]):
-                    targets[-1] = (targets[-1] + '\n' + paragraphs[i + 2])[:300]
+                    targets[-1] = (targets[-1] + '\n' + paragraphs[i + 2])[:TARGET_TEXT_MAX]
             continue
         tail = p[m.end():].lstrip(':: 。')
         if len(tail) >= 8:
-            targets.append(tail[:300])
+            targets.append(tail[:TARGET_TEXT_MAX])
         elif i + 1 < len(paragraphs):
-            targets.append(paragraphs[i + 1][:300])
+            targets.append(paragraphs[i + 1][:TARGET_TEXT_MAX])
     # 句级兜底: "本办法适用于..."
     if not targets:
         for p in paragraphs:
@@ -326,7 +354,7 @@ def extract_support_targets(paragraphs: List[str]) -> List[str]:
             if m:
                 targets.append(m.group(2).strip())
                 break
-    return targets[:5]
+    return targets[:MAX_TARGETS]
 
 
 # ---------- 申报条件 ----------
@@ -340,6 +368,9 @@ ENUM_ITEM_RE = re.compile(r'^(?:[(（][一二三四五六七八九十\d]{1,3}[)�
 TOP_HEADING_RE = re.compile(r'^(?:[一二三四五六七八九十]{1,3}、|第[一二三四五六七八九十百\d]{1,4}[章条])')
 # 阻断头: 进入条件块时遇到这些就停止; 但"支持内容/支持方式/支持标准" 既是支持块头也是阻断头, 在判定时要小心
 STOP_HEADER_RE = re.compile(r'(申报程序|申报流程|申报材料|申报方式|资金拨付|监督管理|附则|实施流程|组织实施|附\s*则)')
+# 资助类章节头: 这些章节的内容是"能拿到多少钱"(funding),不是"需要满足什么条件",
+# 若当条件块收集,资金描述会被误判为资质要求,产生假 fail(如"缺少资质: 专精特新")
+FUNDING_HEADER_RE = re.compile(r'(支持标准|支持内容|支持方式|支持范围|资助标准|奖励标准|补助标准|补贴标准)')
 
 # 软性词 → 非硬性条件
 SOFT_RE = re.compile(r'优先|鼓励|原则上|酌情|视情|适当')
@@ -413,11 +444,14 @@ def classify_condition(text: str) -> List[Dict]:
         return []
     hard = not SOFT_RE.search(text)
     conds: List[Dict] = []
+    # 检测原文是否含"或/或者"关系(用于 _or_group_rescue)
+    any_mode = bool(re.search(r'或者|或(?!者)', text))
 
     def add(field, op=None, value=None, unit=None, review=False, value_text=None):
-        conds.append({'text': text[:200], 'field': field, 'op': op, 'value': value,
+        conds.append({'text': text[:CONDITION_TEXT_MAX], 'field': field, 'op': op, 'value': value,
                       'unit': unit, 'value_text': value_text,
-                      'hard': hard, 'needs_llm_review': review})
+                      'hard': hard, 'needs_llm_review': review,
+                      'any_mode': any_mode})
 
     # 资质类(可多个)
     quals = QUAL_RE.findall(text)
@@ -481,7 +515,7 @@ def split_enum_items(text: str) -> List[str]:
     return items
 
 
-def extract_conditions(paragraphs: List[str], max_items: int = 30) -> List[Dict]:
+def extract_conditions(paragraphs: List[str], max_items: int = MAX_CONDITIONS) -> List[Dict]:
     """定位"申报条件"块,逐条结构化。找不到时句级兜底。"""
     conditions: List[Dict] = []
     raw_items: List[str] = []
@@ -490,29 +524,44 @@ def extract_conditions(paragraphs: List[str], max_items: int = 30) -> List[Dict]
         m = COND_HEADER_RE.search(p)
         if not m:
             continue
+        # 资助类章节(支持标准/支持内容 等)收集的是资金描述,不是申报条件,跳过
+        if FUNDING_HEADER_RE.search(p[:40]):
+            continue
         # 标题段("一、支持对象")只取头,不消费
         if TOP_HEADING_RE.match(p) and m.start() < 8:
             # 但若是"一、支持对象"后无内容,直接看下一段
             tail = p[m.end():].lstrip(':: 。')
             if not tail:
-                # 把下一段作为内容;但 ENUM 段不再累加
+                # 把下一段作为内容;但 ENUM 段不再累加。
+                # block_added 记录**本块**已收集的条目数:描述段只能拼接/追加到
+                # 本块自己的条目上,禁止跨块拼接到上一块的最后一条(否则"支持标准"
+                # 的资金段会污染申报条件)。
                 j = i + 1
+                block_added = 0
                 while j < len(paragraphs) and len(raw_items) < max_items:
                     q = paragraphs[j]
                     if TOP_HEADING_RE.match(q) and not ENUM_ITEM_RE.match(q):
                         if not COND_HEADER_RE.search(q[:30]):
                             break
+                        block_added = 0  # 进入新的条件块,描述段不再拼接旧块条目
+                    if FUNDING_HEADER_RE.search(q[:40]):
+                        break  # 资助类内容不是条件,停止收集
                     if STOP_HEADER_RE.search(q[:30]):
                         break
                     if ENUM_ITEM_RE.match(q):
-                        raw_items.extend(split_enum_items(q) or [q])
+                        added = split_enum_items(q) or [q]
+                        raw_items.extend(added)
+                        block_added += len(added)
                     elif COND_HEADER_RE.search(q):
                         break
                     else:
-                        if not raw_items and 10 <= len(q) <= 500:
-                            raw_items.append(q)
-                        elif raw_items and 10 <= len(q) <= 500:
-                            raw_items[-1] = (raw_items[-1] + ' ' + q).strip()
+                        if 10 <= len(q) <= 500:
+                            if block_added > 0:
+                                raw_items[-1] = (raw_items[-1] + ' ' + q).strip()
+                            else:
+                                # 本块第一个描述段 → 独立成条,不跨块拼接
+                                raw_items.append(q)
+                                block_added += 1
                         else:
                             break
                     j += 1
@@ -520,27 +569,36 @@ def extract_conditions(paragraphs: List[str], max_items: int = 30) -> List[Dict]
 
         # 同段冒号后可能就带条目
         tail = p[m.end():].lstrip(':: 。')
+        block_added = 0
         if tail and len(tail) >= 8:
-            raw_items.extend(split_enum_items(tail))
+            tail_items = split_enum_items(tail)
+            raw_items.extend(tail_items)
+            block_added += len(tail_items)
         # 收集后续条目段
         j = i + 1
         while j < len(paragraphs) and len(raw_items) < max_items:
             q = paragraphs[j]
             if TOP_HEADING_RE.match(q) and not ENUM_ITEM_RE.match(q):
                 break
+            if FUNDING_HEADER_RE.search(q[:40]):
+                break  # 资助类内容不是条件,停止收集
             if STOP_HEADER_RE.search(q[:30]):
                 break
             if ENUM_ITEM_RE.match(q):
-                raw_items.extend(split_enum_items(q) or [q])
+                added = split_enum_items(q) or [q]
+                raw_items.extend(added)
+                block_added += len(added)
             elif COND_HEADER_RE.search(q):
-                pass  # 下一个条件块,继续外层循环处理
+                block_added = 0  # 下一个条件块,描述段不得再拼接旧块条目
             else:
                 # 非条目段:若紧跟头部且还没条目,可能整段就是条件描述
-                if not raw_items and 10 <= len(q) <= 500:
-                    raw_items.append(q)
-                elif raw_items and 10 <= len(q) <= 500:
-                    # 拼接到最后一条(描述性补充)
-                    raw_items[-1] = (raw_items[-1] + ' ' + q).strip()
+                if 10 <= len(q) <= 500:
+                    if block_added > 0:
+                        # 拼接到**本块**最后一条(描述性补充)
+                        raw_items[-1] = (raw_items[-1] + ' ' + q).strip()
+                    else:
+                        raw_items.append(q)
+                        block_added += 1
                 else:
                     break
             j += 1
@@ -601,7 +659,7 @@ def extract_application(paragraphs: List[str]) -> Dict:
         if tail:
             chunks.extend(split_enum_items(tail) or ([tail] if len(tail) > 8 else []))
         j = i + 1
-        while j < len(paragraphs) and len(chunks) < 15:
+        while j < len(paragraphs) and len(chunks) < MAX_APPLICATION_MATERIALS:
             q = paragraphs[j]
             if TOP_HEADING_RE.match(q) and not ENUM_ITEM_RE.match(q):
                 break
@@ -617,12 +675,14 @@ def extract_application(paragraphs: List[str]) -> Dict:
                     app['materials'].append(c)
         elif not app['process_text'] and chunks:
             app['process_text'] = ' / '.join(c[:80] for c in chunks[:6])
-    app['materials'] = app['materials'][:15]
+    app['materials'] = app['materials'][:MAX_APPLICATION_MATERIALS]
     return app
 
 
 # ---------- 主入口 ----------
-def parse_policy(text: str, title: str = '', metadata: Optional[Dict] = None) -> Dict:
+def parse_policy(text: str, title: str = '', metadata: Optional[Dict] = None,
+                 max_chars: int = DEFAULT_MAX_CHARS,
+                 use_llm_triage: bool = True) -> Dict:
     """
     解析政策正文。
 
@@ -630,16 +690,28 @@ def parse_policy(text: str, title: str = '', metadata: Optional[Dict] = None) ->
         text: 政策正文(纯文本,推荐用 gov-doc-collector 的 content_text)
         title: 政策标题(可选,不传则取正文首行)
         metadata: gov-doc-collector detail['metadata'](可选,doc_number 等优先采用)
+        max_chars: 单条正文最大字符数,超过会被截断(默认 20 万,见 DEFAULT_MAX_CHARS)。
+                   设为 0 或负数则不截断。
+        use_llm_triage: triage 分类是否调用 LLM(默认 True)。LLM 可用时优先用模型判断,
+                        不可用/超时自动回退到关键词规则。设 False 则强制走规则。
 
     Returns: 结构化政策 dict(见 skill.md「解析输出」)
     """
     text = (text or '').strip()
     metadata = metadata or {}
+    truncated = False
+    if max_chars and max_chars > 0 and len(text) > max_chars:
+        logger.warning('政策正文超长(%d 字),截断到 %d 字;可能影响 validity/outline 提取',
+                       len(text), max_chars)
+        text = text[:max_chars]
+        truncated = True
     paragraphs = split_paragraphs(text)
     if not title and paragraphs:
-        title = paragraphs[0][:80]
+        title = paragraphs[0][:TITLE_MAX_LEN]
 
     conditions = extract_conditions(paragraphs)
+    if not conditions:
+        logger.debug('未解析出申报条件(title=%s, paragraphs=%d)', title, len(paragraphs))
     parsed = {
         'title': title,
         'doc_type': detect_doc_type(title or text[:200]),
@@ -657,48 +729,99 @@ def parse_policy(text: str, title: str = '', metadata: Optional[Dict] = None) ->
             'chars': len(text),
             'paragraphs': len(paragraphs),
             'conditions': len(conditions),
+            'truncated': truncated,
         },
     }
-    parsed['triage_category'] = _classify_triage(
-        parsed['title'], text, conditions, parsed['doc_type'])
+    parsed['triage_category'], parsed['triage_method'] = _classify_triage(
+        parsed['title'], text, conditions, parsed['doc_type'],
+        use_llm=use_llm_triage)
+    logger.debug('解析完成: triage=%s (method=%s), doc_type=%s, conditions=%d',
+                 parsed['triage_category'], parsed['triage_method'],
+                 parsed['doc_type'], len(conditions))
     return parsed
 
 
 # 标题/正文中"非政策"信号(招聘/会议/吹风会/记者会/调研/报道 等)
+# 注意:"检查"有歧义(监管检查≠新闻),不放此处,由通知分支单独判定
 _NEWS_TITLE_RE = re.compile(
-    r'会议|报道|启动|调研|讲话|吹风|访谈|答记者|记者会|发布会|在京举行|会见|会谈'
-    r'|签约|欢送|致辞|致辞|致辞|部署|检查|考察|出席|举行|召开|赴.{0,4}调研|开展工作'
-    r'|在.{0,6}调研|在.{0,6}考察'
+    r'会议|报道|启动(仪式)?|调研|讲话|吹风|访谈|答记者|记者会|发布会|在京举行'
+    r'|会见|会谈|签约|签署|签订|欢送|致辞|部署|考察|出席|举行|召开'
+    r'|赴.{0,4}调研|开展工作|在.{0,6}调研|在.{0,6}考察'
+    r'|宣讲(会)?|宣讲会|分析会|座谈(会)?|论坛|峰会|开幕|闭幕|闭幕式'
+    r'|放假|休假|节假日|贯彻|落实|传达(会议)?精神'
+    r'|合作(协议|框架)|战略合作|情况通报|工作(情况)?通报'
+    r'|举办.{0,6}(会|活动|仪式|培训)'
 )
 # 标题/正文中"招聘/考试/录用"信号
 _RECRUIT_TITLE_RE = re.compile(
     r'公开招聘|招聘工作人员|考试录用|公务员|事业单位招聘|招录|校园招聘|联合招聘'
 )
-# 政策类信号
+# 申报/资助类关键词(apply 判定复用)
+_APPLY_KW_RE = re.compile(
+    r'申报|资助|补助|贴息|补贴|奖励|认定|扶持|培育|征集|招标|采购'
+    r'|评价|评估|考核|推荐|备案|试点|示范'
+)
+# 规范/监管类关键词(通知/公告场景下判 regulate)
+_REGULATE_KW_RE = re.compile(
+    r'检查|核查|整治|整治行动|专项(行动|整治)|执法|监管|责令|督办|抽查'
+)
+# 政策类信号(兜底)
 _POLICY_HINTS_RE = re.compile(
     r'申报|资助|补助|贴息|补贴|奖励|认定|扶持|培育|征集|招标|采购|计划|规划|方案'
 )
 
 
-def _classify_triage(title: str, text: str,
-                     conditions: list, doc_type: str) -> str:
+def _classify_triage_by_rules(title: str, text: str,
+                              conditions: list, doc_type: str) -> str:
     """
+    规则版分流(关键词 + 文种 + 条件)。作为 LLM 不可用时的兜底。
+
     把政策分为四档(用于'政策分流'前置):
     - apply:     申报/资助/奖励类(企业可申报)
     - regulate:  规范类(法/条例/办法,约束企业行为, 不属申报)
     - news:      新闻/会议/招聘/吹风会/调研
     - other:     其它(无法判定)
+
+    逻辑顺序(从最确定到最不确定):
+    1) 招聘/考试 → news(最特异)
+    2) 法/条例/规定/管理办法/实施细则 → regulate(文种确定,除非含申报条款)
+    3) 通知/公告 → 三路细分:apply(申报词) > regulate(监管词/贯彻落实) > news(会议活动) > other
+    4) 方案/意见/规划/办法 等 → 有申报词/条件 → apply;否则国务院级→regulate;否则 other
+    5) 兜底:_POLICY_HINTS_RE → apply;否则 other
+
+    注意:_NEWS_TITLE_RE 不在全局抢先匹配,仅在通知/公告分支内兜底,
+    避免"关于开展...检查工作的通知"被误判为 news。
     """
     if _RECRUIT_TITLE_RE.search(title):
         return 'news'
-    if _NEWS_TITLE_RE.search(title):
-        return 'news'
+
     if doc_type in ('法', '条例', '规定', '管理办法', '实施细则'):
         # 法/条例是规范类, 除非有具体的申报条款, 否则不算"申报类"
-        if any(re.search(r'申报|资助|补助|奖励|认定', c.get('text','')) for c in conditions):
+        if any(re.search(r'申报|资助|补助|奖励|认定', c.get('text', '')) for c in conditions):
             return 'apply'
         return 'regulate'
-    # 通知/公告/办法/细则 等: 需要双重判断
+
+    # 通知/公告:最常见文种,需 apply/regulate/news 三路细分
+    if doc_type in ('通知', '公告'):
+        # 1) 申报/资助类(优先级最高)
+        if _APPLY_KW_RE.search(title):
+            return 'apply'
+        if conditions:
+            return 'apply'
+        # 2) 规范/监管类:检查/核查/整治/执法/贯彻落实法律
+        if _REGULATE_KW_RE.search(title):
+            return 'regulate'
+        if re.search(r'贯彻.{0,6}落实|贯彻落实', title):
+            return 'regulate'
+        # 3) 新闻/会议/活动类(放假、会议通知、签约、宣讲等)
+        if _NEWS_TITLE_RE.search(title):
+            return 'news'
+        # 4) 既无申报词也无新闻信号的"通知" → other
+        if re.search(r'立法工作计划|工作计划|车用.{0,8}价格|价格.{0,4}通知', title):
+            return 'other'
+        return 'other'
+
+    # 方案/意见/规划/办法/细则 等: 需要双重判断
     if doc_type in ('办法', '细则', '意见', '方案', '指南', '目录',
                     '措施', '决定', '规则', '行动方案', '实施方案', '若干措施',
                     '若干政策', '行动计划', '工作要点', '规划', '指导意见', '实施意见'):
@@ -710,29 +833,77 @@ def _classify_triage(title: str, text: str,
         # 规划/意见/方案 等需要进一步判断: 有 conditions OR 含申报关键词 → apply
         if conditions:
             return 'apply'
-        if re.search(r'申报|资助|补助|贴息|补贴|奖励|认定|扶持|培育|征集|招标|采购', title):
+        if _APPLY_KW_RE.search(title):
             return 'apply'
         # 国务院级规划/意见/方案 → 规范类
         if re.search(r'国务院|规划$|工作要点$|实施方案$|若干措施$', title):
             return 'regulate'
         return 'other'
-    if doc_type in ('通知', '公告'):
-        if re.search(r'申报|资助|补助|贴息|补贴|奖励|认定|扶持|培育|征集|招标|采购', title):
-            return 'apply'
-        if re.search(r'立法工作计划|工作计划|车用.{0,8}价格|价格.{0,4}通知', title):
-            return 'other'
-        if conditions:
-            return 'apply'
-        return 'other'
+
+    # 文种为"其他"时:用关键词兜底
+    # 先排新闻(招聘已处理,这里查会议/活动/调研)
+    if _NEWS_TITLE_RE.search(title):
+        return 'news'
     if _POLICY_HINTS_RE.search(title):
         return 'apply'
     return 'other'
 
 
-def parse_from_detail(detail: Dict, title: str = '') -> Dict:
-    """直接消费 gov-doc-collector 的 fetch_detail() 输出。"""
-    return parse_policy(detail.get('content_text', ''), title=title,
-                        metadata=detail.get('metadata') or {})
+def _classify_triage(title: str, text: str,
+                     conditions: list, doc_type: str,
+                     use_llm: bool = True):
+    """
+    政策分流编排:LLM 优先,规则兜底。返回 (category, method)。
+
+    - use_llm=True 且 LLM 可用(配置了 POLICY_LLM_API_KEY)→ 调用模型判断;
+      LLM 不可用/超时/返回异常 → 自动回退规则(method 如实标记 'rules')。
+    - use_llm=False → 直接走规则(_classify_triage_by_rules)。
+
+    method 反映**实际产出结果**的路径,而不是"LLM 是否配置了"。
+    """
+    if use_llm and classify_triage_with_llm is not None and is_llm_available():
+        result = classify_triage_with_llm(title, text, doc_type, conditions)
+        if result is not None:
+            category = result['category']
+            logger.debug('LLM triage: %s (conf=%.2f, reason=%s) title=%s',
+                         category, result.get('confidence', 0.0),
+                         result.get('reason', ''), (title or '')[:40])
+            return category, 'llm'
+        # LLM 返回 None → 回退规则
+        logger.debug('LLM triage 返回 None,回退规则分类')
+    return _classify_triage_by_rules(title, text, conditions, doc_type), 'rules'
+
+
+def parse_from_detail(detail: Dict, title: str = '',
+                      max_chars: int = DEFAULT_MAX_CHARS,
+                      use_llm_triage: bool = True) -> Dict:
+    """
+    直接消费 gov-doc-collector 的 fetch_detail() 输出。
+
+    对入参做基本校验:detail 为空或缺 content_text 时,
+    返回带 parse_status 的空结果,避免下游静默拿到全空数据。
+    """
+    if not detail or not isinstance(detail, dict):
+        logger.warning('parse_from_detail 收到空 detail,返回空结果(parse_status=empty_input)')
+        return {'title': title or '', 'doc_type': '其他',
+                'doc_number': None, 'issuer': None, 'issue_date': None,
+                'validity': {}, 'support_targets': [], 'support_measures': [],
+                'funding': [], 'conditions': [], 'application': {'materials': [], 'process_text': None},
+                'outline': [], 'triage_category': 'other', 'triage_method': 'rules',
+                'stats': {'chars': 0, 'paragraphs': 0, 'conditions': 0, 'truncated': False},
+                'parse_status': 'empty_input'}
+    content_text = detail.get('content_text', '') or ''
+    if not content_text.strip():
+        logger.warning('detail.content_text 为空,返回空结果(parse_status=empty_content) title=%s', title)
+        empty = parse_policy('', title=title, metadata=detail.get('metadata') or {},
+                             max_chars=max_chars, use_llm_triage=use_llm_triage)
+        empty['parse_status'] = 'empty_content'
+        return empty
+    parsed = parse_policy(content_text, title=title,
+                          metadata=detail.get('metadata') or {}, max_chars=max_chars,
+                          use_llm_triage=use_llm_triage)
+    parsed.setdefault('parse_status', 'ok')
+    return parsed
 
 
 if __name__ == '__main__':
