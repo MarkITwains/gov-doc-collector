@@ -9,10 +9,12 @@ try:
     from .fetcher import GovDocFetcher, detect_encoding
     from .parser import extract_items
     from .detail_extractor import extract_detail
+    from .policy_candidate import score_candidate
 except ImportError:
     from fetcher import GovDocFetcher, detect_encoding
     from parser import extract_items
     from detail_extractor import extract_detail
+    from policy_candidate import score_candidate
 
 logger = logging.getLogger(__name__)
 
@@ -206,12 +208,54 @@ class UnifiedFetcher(GovDocFetcher):
                 'attachments': [],
                 'metadata': {},
                 'has_content': False,
+                'content_quality': {'score': 0, 'level': 'low', 'flags': ['fetch_error']},
+                'content_usable': False,
                 'error': str(e),
             }
 
+    def _select_detail_targets(self, items: List[Dict], limit: int,
+                               channel_type: Optional[str] = None,
+                               prefilter=None) -> List[Dict]:
+        """挑出值得抓详情的条目;其余写 `skip_reason` 后留在列表里。
+
+        详情抓取是最贵的一步(还要三级降级重试),先按"申报候选"筛一遍:
+        真实语料里 90%+ 是新闻/会议/招聘/法规,不该为它们抓详情。
+        """
+        picked: List[Dict] = []
+        for it in items:
+            if not it.get('link'):
+                it.setdefault('skip_reason', '无链接')
+                continue
+            if prefilter is not None:
+                ok = bool(prefilter(it))
+                it['candidate'] = {'decision': 'apply' if ok else 'reject',
+                                   'score': None, 'reasons': ['自定义 prefilter']}
+            else:
+                info = score_candidate(it.get('title') or '',
+                                       it.get('link') or it.get('source_path') or '',
+                                       channel_type)
+                it['candidate'] = info
+                ok = info['decision'] == 'apply'
+            if not ok:
+                info = it.get('candidate') or {}
+                it.setdefault('skip_reason',
+                              '; '.join(info.get('reasons') or ['未通过候选筛选']))
+                it.setdefault('detail', None)
+                logger.debug('跳过详情抓取(非申报候选): %s',
+                             (it.get('title') or '')[:40])
+                continue
+            if len(picked) < limit:
+                picked.append(it)
+            else:
+                it.setdefault('skip_reason', f'超出 limit={limit},未抓详情')
+                it.setdefault('detail', None)
+        return picked
+
     def fetch_list_with_details(self, site_key: str, level: str = "national",
                                 limit: int = 5, include_detail: bool = True,
-                                max_workers: int = DETAIL_MAX_WORKERS) -> List[Dict]:
+                                max_workers: int = DETAIL_MAX_WORKERS,
+                                only_apply: bool = False,
+                                prefilter=None) -> List[Dict]:
         """
         一步到位: 列表 + 详情正文
 
@@ -219,6 +263,10 @@ class UnifiedFetcher(GovDocFetcher):
             limit: 限制详情抓取条数(详情页抓取慢,默认 5)
             max_workers: 详情并发度;need_js 站点自动降为串行
                          (Playwright sync API 非线程安全)
+            only_apply: True 时先用 policy_candidate 打分,**只对申报/资助候选**
+                        抓详情;其余条目 `detail=None` 且带 `skip_reason`,仍保留在
+                        返回列表里(便于核对是不是筛过头)
+            prefilter: 自定义回调 callable(item) -> bool,给出时以它为准
         """
         items = self.fetch_list(site_key, level)
         if not include_detail or not items:
@@ -228,8 +276,12 @@ class UnifiedFetcher(GovDocFetcher):
         use_cffi = config.get('use_cffi', False)
         need_js = config.get('need_js', False)
         base_url = config.get('base_url', '')
+        channel_type = config.get('channel_type')
 
-        targets = [it for it in items[:limit] if it.get('link')]
+        if prefilter is not None or only_apply:
+            targets = self._select_detail_targets(items, limit, channel_type, prefilter)
+        else:
+            targets = [it for it in items[:limit] if it.get('link')]
         if not targets:
             return items
 
@@ -238,6 +290,7 @@ class UnifiedFetcher(GovDocFetcher):
             for item in targets:
                 item['detail'] = self.fetch_detail(
                     item['link'], base_url, use_cffi=use_cffi, need_js=need_js)
+            self._log_quality_summary(targets)
             return items
 
         # 纯 HTTP/cffi 站点 → 线程池并发(每个 worker 独立会话,避免共享状态)
@@ -270,7 +323,25 @@ class UnifiedFetcher(GovDocFetcher):
             for fut in as_completed(futures):
                 item, detail = fut.result()
                 item['detail'] = detail
+        self._log_quality_summary(targets)
         return items
+
+    @staticmethod
+    def _log_quality_summary(items: List[Dict]) -> None:
+        """汇总正文质量(P1-1):低质量正文多半是抓错了页面(栏目页/目录页)。"""
+        levels: Dict[str, int] = {}
+        for it in items:
+            q = (it.get('detail') or {}).get('content_quality') or {}
+            lv = q.get('level')
+            if lv:
+                levels[lv] = levels.get(lv, 0) + 1
+        if levels.get('low'):
+            logger.warning('详情正文质量偏低 %d/%d 条(疑似导航页/目录页,'
+                           '建议用 scripts/find_channels.py 核对栏目);明细见 '
+                           'eval_policy_analyzer.py --show-low-quality',
+                           levels['low'], len(items))
+        if levels:
+            logger.debug('正文质量分布: %s', levels)
 
     def fetch_list_new(self, site_key: str, level: str = "national",
                        max_pages: Optional[int] = None,

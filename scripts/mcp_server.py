@@ -24,8 +24,10 @@ from mcp.server.fastmcp import FastMCP
 # 兼容包内导入(scripts.mcp_server)与直接脚本执行
 try:
     from .unified_fetcher import UnifiedFetcher
+    from .policy_candidate import split_candidates
 except ImportError:
     from unified_fetcher import UnifiedFetcher
+    from policy_candidate import split_candidates
 
 mcp = FastMCP(
     'gov-doc-collector',
@@ -49,7 +51,8 @@ def get_fetcher() -> UnifiedFetcher:
 
 @mcp.tool()
 def fetch_gov_docs(site_key: str, level: str = 'national', limit: int = 10,
-                   max_pages: Optional[int] = None) -> dict:
+                   max_pages: Optional[int] = None,
+                   only_apply: bool = False) -> dict:
     """采集政府部委网站的文档列表(按站点配置自动启用 curl_cffi / JS 渲染)。
 
     Args:
@@ -57,8 +60,20 @@ def fetch_gov_docs(site_key: str, level: str = 'national', limit: int = 10,
         level: 政府级别,national(国家部委) / provincial(省级政府)
         limit: 返回记录数量上限
         max_pages: 翻页数(仅对配置了 pagination 的站点生效;缺省用站点配置值)
+        only_apply: 只返回"申报/资助候选"(按标题 + 栏目 + URL 先验打分,不抓详情),
+                    用来核对站点栏目是否对准了申报公告
     """
     items = get_fetcher().fetch_list(site_key, level, max_pages=max_pages) or []
+    if only_apply:
+        candidates, skipped = split_candidates(items)
+        return {
+            'site_key': site_key,
+            'level': level,
+            'total_count': len(items),
+            'candidate_count': len(candidates),
+            'skipped_count': len(skipped),
+            'items': candidates[:limit],
+        }
     return {
         'site_key': site_key,
         'level': level,
@@ -121,19 +136,27 @@ def fetch_gov_doc_detail(url: str, base_url: str = '',
 
 @mcp.tool()
 def fetch_gov_docs_with_details(site_key: str, level: str = 'national',
-                                limit: int = 5) -> dict:
+                                limit: int = 5,
+                                only_apply: bool = True) -> dict:
     """采集指定站点列表 + 前 N 条详情正文(端到端)。
 
     Args:
         site_key: 站点标识符
         level: 政府级别,national / provincial
         limit: 详情抓取条数(详情页抓取较慢,建议 ≤ 10)
+        only_apply: 默认 True —— 先用候选筛选,**只为申报/资助候选**抓详情
+                    (真实语料里 90%+ 是新闻/法规,默认全抓是纯浪费);
+                    被筛掉的条目仍返回,带 `skip_reason` 便于核对
     """
-    items = get_fetcher().fetch_list_with_details(site_key, level, limit=limit)
+    items = get_fetcher().fetch_list_with_details(
+        site_key, level, limit=limit, only_apply=only_apply)
+    fetched = sum(1 for it in items if it.get('detail'))
     return {
         'site_key': site_key,
         'level': level,
-        'fetched_details': min(limit, len(items)),
+        'total_count': len(items),
+        'fetched_details': fetched,
+        'skipped_count': sum(1 for it in items if it.get('skip_reason')),
         'items': items,
     }
 

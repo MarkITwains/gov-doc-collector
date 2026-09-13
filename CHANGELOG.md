@@ -4,6 +4,107 @@
 
 ---
 
+## v1.8.0 — 2026-09-13
+
+**主题**: 提高"命中率"——把漏斗建在便宜的一侧(栏目 → 候选 → 详情),而不是继续堆正则
+
+**背景(实测)**:67 篇真实详情里 `triage=apply` 只有 1 篇(1.5%),
+`news/other` 占 82%;标题级 85% 没有任何申报信号 —— 说明瓶颈在"采什么",
+不在于"怎么解析"。详情抓取还是整条链路最贵的一步(三级降级重试),
+而 `fetch_list_with_details` 此前对前 N 条**无筛选**全部抓详情。
+
+### gov-doc-collector
+
+1. **多栏目采集**(P0-1):`search_path` 支持数组 + `extra_paths`,
+   `fetch_list` 逐栏目采集、单栏目空页即停、条目带 `source_path`;
+   模板型分页只对"模板所属栏目"生效(避免翻到别的栏目上);
+   站点可声明 `channel_type`(apply/notice/law/news)作为栏目先验
+2. **候选预筛**(P0-2):新增 `scripts/policy_candidate.py`
+   (栏目类型 → URL 特征 → 标题信号,高精度):
+   - `fetch_list_with_details(only_apply=True)`:只为申报/资助候选抓详情,
+     其余条目 `detail=None` + `skip_reason`,保留在返回列表里便于核对
+   - MCP `fetch_gov_docs_with_details` 默认 `only_apply=true`;
+     `fetch_gov_docs(only_apply=true)` 可先看候选清单再决定抓不抓
+   - 支持类"办法"(《贷款贴息支持办法》《专项资金管理办法》)判为候选,
+     规范/监管类(《保护办法》《处罚条例》)剔除
+3. **栏目探测工具**:`scripts/find_channels.py` 抓首页并按"申报相关度"排序输出
+   站内栏目(含 URL 类型先验 + 名称权重),末尾给出可直接粘贴的
+   `search_path` / `channel_type` 配置片段
+4. **正文质量门禁**(P1-1):`detail_extractor.assess_content_quality()`
+   按模板词、段落重复率、句读密度、段落粒度打分,返回
+   `content_quality{score,level,flags}` + `content_usable`;
+   实测抓出 4 条错采页(央行"规章制定工作计划"目录页、宁夏新闻页模板噪声)。
+   `has_content` 语义保持不变,新增 `content_usable` 供调用方决策
+5. **依赖收紧**:`mcp>=1.2.0,<2` —— mcp 2.x 把 `FastMCP` 改名为 `MCPServer`,
+   `mcp_server.py` 走 v1 接口,先前环境下 MCP 用例与工具直接起不来
+
+### 评测闭环(P0-3)
+
+6. 新增 `scripts/eval_policy_analyzer.py`,两种模式:
+   - **语料模式**:漏斗(triage 分布)→ 字段覆盖率 → 申报类内部覆盖率 →
+     候选预筛校准(精确率/召回率 vs triage);与 `eval/baseline.json` 比对,
+     `--fail-on-drop 0.05` 可直接进 CI;`--show-low-quality` 列错采页面
+   - **标注集模式**:`eval/golden.example.jsonl` → 逐字段 P/R/F1 + 逐条 diff
+     (条件按 `(field, op, 归一化 value)` 集合比较,金额统一到万元)
+7. 基线已生成(`eval/baseline.json`):67 篇 / apply 1.5% /
+   conditions 6.0% / funding 4.5% / 候选预筛 precision 0.5 recall 1.0
+   —— 数字本身说明"分母错了",后续每次改动都可量化
+
+### 质量保障
+
+8. 回归测试 36 → **77 用例**(新增候选筛选、多栏目、预筛、质量门禁、
+   LLM 抽取补漏等全部新能力,仍全部离线)
+9. 评测驱动修复两处漏抽:`未被列入经营异常名录` 归入 credit;
+   法规类文种里出现"申报条件"章节 → 判为申报类
+
+### policy-analyzer (v1.6.0)
+
+10. **LLM 条件抽取补漏**(P1-2,可选):正则高精度低召回、LLM 高召回会幻觉,
+    因此按"补漏"使用 —— 仅在正则结构化条件 < 3 条时触发,每条须带原文
+    `quote` 且通过回验,只补缺失的 `(field, op, value)` 组合,冲突保留正则;
+    结果按 (prompt 版本 + 模型 + 正文哈希) 落盘缓存
+11. `llm_triage` 抽出公共入口 `chat_json()`(配置容错 + 熔断 + JSON 解析合一),
+    JSON 提取新增括号配平兜底;`parse_from_detail` 透传 `content_quality`
+
+---
+
+## v1.7.1 — 2026-09-13
+
+**主题**: policy-analyzer 修复 6 个已复现 bug(其中 3 个会产生错误结论)
+
+### policy-analyzer (v1.5.0)
+
+1. **非法 LLM 配置拖垮整条解析**(结论级):`POLICY_LLM_TIMEOUT=30s` 这类非法值
+   在 `_get_config` 抛 `ValueError`,而调用点 `_classify_triage` 在 try 之外 →
+   整个 `parse_policy` 失败,违反"LLM 不可用自动回退规则"的承诺。
+   现改为告警 + 回退默认值;另加连续失败 3 次熔断
+   (`llm_triage.reset_failure_state()` 可恢复),批量解析不再逐篇等满超时
+2. **triage 把监管/名单类通知误判为申报类**(结论级):通知/公告分支原先
+   "有 conditions 就 apply",而 conditions 常来自句级兜底("企业应当具备…"),
+   「检查工作的通知」「公布名单的通知」因此被判 apply 并送进匹配。
+   现改为标题信号优先(申报 > 监管 > 新闻 > 结果公示)+ 只认**实质条件**
+3. **划型类资质假 fail**(结论级):"中小企业/小微企业"是划型指标而非认证,
+   画像 `qualifications` 未列时原先直接判硬性 fail → 合规企业被判 ineligible。
+   现按 `revenue`/`headcount` 复核 → `review`,明显超划型上限
+   (>1000 人且 >20 亿元)才 fail
+4. **上下界条件丢上界**:一条原文里只取第一个数值("不少于20人且不超过300人"
+   丢掉 300 人),500 人的企业会判通过;现拆成两条条件分别核对
+5. **funding 上限跨小句误判**:`一次性奖励50万元,最高不超过500万元` 中的
+   50 万元被标成"(上限)";上限词现只在**本小句**内判定
+6. **属地市级证据过强**:标题中段顺带提到的城市会把省级政策降级为市级,
+   同省异地企业被判硬性 fail;现仅"城市名在发文机关,或位于标题开头"才算市级
+7. 其它修复:`eligible` 判定排除未满足的软性条件;`format_report` 容忍
+   funding 项缺 `value_wan`(不再 KeyError);`parse_from_detail` 空输入的
+   `validity` 结构与正常解析对齐;枚举支持同行空格分隔;
+   CLI 支持 stdin/文件参数(编码 utf-8 → gb18030 兜底),文档与实现对齐;
+   删除 `detect_doc_type` 中不可达分支
+
+### 质量保障
+
+8. 回归测试扩充到 **50 用例**(新增 14 条 policy-analyzer 修复用例)
+
+---
+
 ## v1.7.0 — 2026-08-03
 
 **主题**: 数据质量(P1)+ 新功能:分页、增量监控、属地推断

@@ -1,7 +1,7 @@
 ---
 name: gov-doc-collector
 description: 采集国家部委和省级政府网站的政策文档和公告
-version: 1.7.0
+version: 1.8.0
 author: Hermes Team
 metadata:
   hermes:
@@ -29,8 +29,11 @@ gov-doc-collector 是一个专门用于采集中国政府官网和政务公开�
 - ✅ **JS渲染支持** (Playwright)
 - ✅ **反爬虫绕过** (curl_cffi浏览器指纹)
 - ✅ **三级采集策略自动降级** (curl_cffi → Playwright → plain requests)
+- ✅ **多栏目采集**:`search_path` 支持数组(通知公告 + 申报专区 + 政策法规)
+- ✅ **抓详情前先筛候选**:`only_apply` 只对申报/资助候选抓详情
 - ✅ XML/JSON/HTML 多格式解析
 - ✅ **详情页正文提取** (发文字号/发文日期/附件/正文,30+ 容器选择器)
+- ✅ **正文质量门禁** (`content_quality`:识别错采的导航页/目录页)
 - ✅ 自动去重和数据清洗
 - ✅ 提供MCP Server接口
 
@@ -58,7 +61,7 @@ gov-doc-collector 是一个专门用于采集中国政府官网和政务公开�
 - **可用**: 50/61 站点 **(82%)** (UnifiedFetcher 完整能力)
 - **基础可用**: 44/61 (72%) (仅 plain requests)
 - **记录**: 3380 条政策
-- **版本**: v1.7.0 (2026-08-03)
+- **版本**: v1.8.0 (2026-09-13)
 
 ## 使用方法
 
@@ -118,7 +121,7 @@ for item in items[:3]:
 ### 3. 命令行
 
 ```bash
-# 离线回归测试(12 用例,含 MCP 协议握手)
+# 离线回归测试(77 用例,含 MCP 协议握手)
 python scripts/test_regressions.py
 
 # 最终测试
@@ -126,6 +129,15 @@ python scripts/test_final.py
 
 # 站点诊断
 python scripts/diagnose_sites.py
+
+# 栏目探测:找出申报/通知公告栏目(回填 search_path)
+python scripts/find_channels.py beijing --level provincial
+python scripts/find_channels.py --level national --all --limit 5
+
+# 评测:漏斗/覆盖率/候选预筛校准,可与基线对比(CI 用 --fail-on-drop)
+python scripts/eval_policy_analyzer.py
+python scripts/eval_policy_analyzer.py --show-low-quality    # 疑似错采页面清单
+python scripts/eval_policy_analyzer.py --golden eval/golden.example.jsonl
 ```
 
 ### 3. MCP Server
@@ -150,9 +162,12 @@ python scripts/diagnose_sites.py
 {
   "site_key": "ndrc",
   "level": "national",
-  "limit": 10
+  "limit": 10,
+  "only_apply": false
 }
 ```
+> `only_apply=true`:只返回"申报/资助候选"(按标题 + URL 栏目先验打分,不抓详情),
+> 用来核对站点栏目是否对准了申报公告。
 
 **list_available_sites** - 列出可用站点
 ```json
@@ -176,9 +191,13 @@ python scripts/diagnose_sites.py
 {
   "site_key": "mof",
   "level": "national",
-  "limit": 3
+  "limit": 3,
+  "only_apply": true
 }
 ```
+> `only_apply` 默认 **true**:只为申报/资助候选抓详情(实测真实语料里 90%+ 是
+> 新闻/法规,全量抓是纯浪费);被筛掉的条目仍返回,带 `skip_reason` 便于核对。
+> 返回里 `fetched_details` 是实际抓到详情的条数,`skipped_count` 是被筛掉的条数。
 
 **fetch_new_gov_docs** - 增量采集,只返回新政策(政策监控,cron 友好)
 ```json
@@ -215,9 +234,14 @@ python scripts/diagnose_sites.py
     "category": "...",
     "index_number": "..."
   },
-  "has_content": true
+  "has_content": true,
+  "content_quality": {"score": 92, "level": "high", "flags": []},
+  "content_usable": true
 }
 ```
+> `content_quality.level=low` 表示正文疑似是导航页/目录页(错采),
+> `content_usable=false` 时建议不要喂给解析器;清单见
+> `python scripts/eval_policy_analyzer.py --show-low-quality`。
 
 ## 站点标识符
 
@@ -248,7 +272,8 @@ python scripts/diagnose_sites.py
   "site_key": {
     "name": "网站名称",
     "base_url": "https://example.gov.cn",
-    "search_path": "/zhengce/",
+    "search_path": ["/tzgg/", "/zcsb/", "/zhengce/"],
+    "channel_type": "notice",
     "selectors": {
       "list": "ul.list li",
       "title": "a.title",
@@ -258,6 +283,10 @@ python scripts/diagnose_sites.py
   }
 }
 ```
+
+`search_path` 支持字符串(单栏目)或**数组**(多栏目);`channel_type`
+(apply/notice/law/news)是整站栏目先验,比标题信号可靠。可用
+`python scripts/find_channels.py <site_key>` 探测候选栏目。
 
 ## 测试结果
 
@@ -342,6 +371,34 @@ new_items = fetcher.fetch_list_new('ndrc', 'national')  # 只报新政策(已见
 - [scripts/unified_fetcher.py](../scripts/unified_fetcher.py) - 主采集器
 
 ## 更新日志
+
+### v1.8.0 (2026-09-13)
+
+**主题**: 提高"命中率"——把漏斗做在便宜的一侧(栏目 → 候选 → 详情)
+
+- ✨ **多栏目采集**:`search_path` 支持数组(+ `extra_paths`),`fetch_list` 逐栏目
+  采集、单栏目空页即停、条目带 `source_path`;模板型分页只对所属栏目生效
+  —— 实测 67 篇详情里申报类仅 1.5%,根因是栏目只配了"政策法规"
+- ✨ **站点栏目先验**:配置可声明 `channel_type`(apply/notice/law/news),
+  比标题更可靠
+- ✨ **候选预筛(先筛后抓)**:新增 `policy_candidate.py`(栏目 + URL + 标题信号,
+  高精度);`fetch_list_with_details(only_apply=True)` / MCP
+  `fetch_gov_docs_with_details`(默认开)只为申报候选抓详情,其余条目带
+  `skip_reason` 返回;MCP `fetch_gov_docs(only_apply=true)` 可先看候选再抓
+- ✨ **栏目探测工具**:`scripts/find_channels.py` 抓首页并按"申报相关度"排序列出
+  站内栏目,输出可直接粘贴的 `search_path` / `channel_type` 片段
+- ✨ **正文质量门禁**:`detail_extractor.assess_content_quality()` 识别错采的
+  导航页/目录页(模板词、段落重复率、句读密度),返回
+  `content_quality{score,level,flags}` + `content_usable`;实测抓出 4 条
+  "工作职责/规章计划目录"页
+- ✨ **评测闭环**:`scripts/eval_policy_analyzer.py`
+  - 语料模式:漏斗(triage 分布)+ 字段覆盖率 + 申报类内部覆盖率 + 候选预筛校准,
+    与 `eval/baseline.json` 比对,`--fail-on-drop` 可用于 CI
+  - 标注集模式:`eval/golden.example.jsonl` → 逐字段 P/R/F1 + 逐条 diff
+  - `--show-low-quality` 输出疑似错采页面清单
+- 🔧 依赖:`requirements.txt` 收紧为 `mcp>=1.2.0,<2`(mcp 2.x 把 FastMCP 改名为
+  MCPServer,`mcp_server.py` 走 v1 接口;先前会 ModuleNotFoundError)
+- ✅ 回归测试扩充到 **77 用例**
 
 ### v1.7.0 (2026-08-03)
 - ✨ **分页采集**:站点配置 `pagination`(template/query 两种),`max_pages` 可调,

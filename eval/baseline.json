@@ -1,0 +1,106 @@
+{
+  "corpus": "D:\\myProject\\hermes_agent\\scripts\\detail_full_results.json",
+  "docs": 67,
+  "triage": {
+    "other": {
+      "count": 31,
+      "pct": 46.3
+    },
+    "news": {
+      "count": 24,
+      "pct": 35.8
+    },
+    "regulate": {
+      "count": 11,
+      "pct": 16.4
+    },
+    "apply": {
+      "count": 1,
+      "pct": 1.5
+    }
+  },
+  "coverage": {
+    "doc_number": {
+      "count": 18,
+      "pct": 26.9
+    },
+    "conditions": {
+      "count": 4,
+      "pct": 6.0
+    },
+    "funding": {
+      "count": 3,
+      "pct": 4.5
+    },
+    "support_targets": {
+      "count": 4,
+      "pct": 6.0
+    },
+    "support_measures": {
+      "count": 24,
+      "pct": 35.8
+    },
+    "validity": {
+      "count": 9,
+      "pct": 13.4
+    }
+  },
+  "apply_share_pct": 1.5,
+  "apply_with_conditions_pct": 100.0,
+  "apply_with_funding_pct": 100.0,
+  "candidate_prefilter": {
+    "pass": 2,
+    "pass_pct": 3.0,
+    "pass_is_apply": 1,
+    "precision_vs_triage": 0.5,
+    "recall_vs_triage": 1.0
+  },
+  "content_quality": {
+    "high": 30,
+    "medium": 33,
+    "low": 4
+  },
+  "low_quality_docs": [
+    {
+      "site_key": "pbc",
+      "title": "中国人民银行2026年规章制定工作计...",
+      "url": "https://www.pbc.gov.cn/tiaofasi/144941/144943/144945/2026050917245152485/index.html",
+      "flags": [
+        "导航/模板词: 无障碍浏览、网站地图、主办单位、ICP备",
+        "段落重复率 38%(疑似导航/目录)",
+        "句读过少(0 个/ 1409 字,疑似罗列式导航)"
+      ]
+    },
+    {
+      "site_key": "pbc",
+      "title": "中国人民银行2026年规章制定工作计...",
+      "url": "https://www.pbc.gov.cn/tiaofasi/144941/144943/144945/2026050917245152485/index.html",
+      "flags": [
+        "导航/模板词: 无障碍浏览、网站地图、主办单位、ICP备",
+        "段落重复率 38%(疑似导航/目录)",
+        "句读过少(0 个/ 1409 字,疑似罗列式导航)"
+      ]
+    },
+    {
+      "site_key": "ningxia",
+      "title": "李邑飞调研督导交通运输安全生产工作并主持召开专题会 精耕细...",
+      "url": "https://www.nx.gov.cn/zwxx_11337/nxyw/202606/t20260610_5261689.html",
+      "flags": [
+        "导航/模板词: 无障碍浏览、网站地图、主办单位、ICP备",
+        "段落重复率 39%(疑似导航/目录)",
+        "句读过少(77 个/ 10606 字,疑似罗列式导航)"
+      ]
+    },
+    {
+      "site_key": "ningxia",
+      "title": "张雨浦到中卫市调研数字信息产业发展情况 加快实施数字宁夏战...",
+      "url": "https://www.nx.gov.cn/zwxx_11337/nxyw/202606/t20260610_5262539.html",
+      "flags": [
+        "导航/模板词: 无障碍浏览、网站地图、主办单位、ICP备",
+        "段落重复率 39%(疑似导航/目录)",
+        "句读过少(77 个/ 7957 字,疑似罗列式导航)"
+      ]
+    }
+  ],
+  "generated_at": "2026-09-13"
+}

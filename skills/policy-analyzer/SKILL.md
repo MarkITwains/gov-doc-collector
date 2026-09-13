@@ -1,7 +1,7 @@
 ---
 name: policy-analyzer
 description: 解析政府政策正文为结构化数据,并与给定企业画像匹配,输出 eligible/likely/uncertain/ineligible/not_applicable 五档适配结论与可读 Markdown 报告。
-version: 1.4.0
+version: 1.6.0
 author: Hermes Team
 metadata:
   hermes:
@@ -22,6 +22,10 @@ metadata:
         description: triage 分类是否调用 LLM(默认开启,不可用时自动回退规则)
         default: "true"
         prompt: 设 false 则强制走关键词规则;设 true 优先用模型判断
+      - key: policy_analyzer.llm_extract
+        description: 申报条件抽取是否用 LLM 补漏(默认关闭)
+        default: "false"
+        prompt: 设 true 时,正则抽到的结构化条件少于 3 条会调用 LLM 补漏,每条须通过原文回验
 ---
 
 # 政策内容识别整理 (policy-analyzer)
@@ -133,11 +137,40 @@ print(parsed['triage_category'], parsed['triage_method'])  # apply / 'llm' 或 '
 | `POLICY_LLM_TIMEOUT` | `15` | 超时秒数 |
 
 > 规则版作为兜底始终可用;LLM 仅用于提升分流准确率,不改变其它字段提取逻辑。
+> v1.5.0 起:环境变量写错(如 `POLICY_LLM_TIMEOUT=30s`)只告警并回退默认值,
+> **不会**让整条解析失败;连续失败 3 次后本进程内自动停用 LLM(避免批量解析
+> 逐篇等满超时),可用 `llm_triage.reset_failure_state()` 恢复。
+
+### 条件抽取:正则为主 + LLM 补漏(可选)
+
+正则高精度、低召回(版式一变就抽不到);LLM 高召回、会幻觉。所以默认**不开**,
+开启后按"补漏"使用 —— 只在**结构化条件少于 3 条**时才调用,且:
+
+1. 每条必须带原文 `quote`,由 `verify_quote()` 回正文做子串校验,**对不上直接丢弃**
+2. field/op 走白名单,类型必须自洽
+3. 只补正则没有的 `(field, op, value)` 组合,冲突一律保留正则
+4. 结果按 `(prompt 版本 + 模型 + 正文哈希)` 落盘缓存,重复解析不再请求
+
+```python
+parsed = parse_policy(text, title=title, use_llm_extract=True)
+print(parsed['extract_method'], parsed['llm_extract_added'])  # 'rules+llm' 1
+# 或走环境变量:set POLICY_LLM_EXTRACT=1(默认关闭)
+```
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `POLICY_LLM_EXTRACT` | `0` | 设 1 开启条件抽取补漏(等价于 `use_llm_extract=True`) |
+| `POLICY_LLM_CACHE_DIR` | `<repo>/.cache/policy_extract` | 抽取结果缓存目录 |
+| `POLICY_LLM_CACHE` | `1` | 设 0 关闭缓存(调试用) |
+
+> 缓存的是**校验后**的结果,所以重放不会引入幻觉;改 prompt 时递增
+> `llm_extract.PROMPT_VERSION` 即可让旧缓存自动失效。
 
 `verdict` 取值:
-- `eligible` ✅ — 全部硬性条件确定通过,无 unknown/review。
+- `eligible` ✅ — 全部硬性条件确定通过,无 unknown/review,也无未满足的软性条件。
 - `likely` 🟡 — 多数已核通过,部分字段画像缺数据或需语义复核;
-             或是**全 review**(纯语义条件,交给 LLM 复盘)。
+             或是**全 review**(纯语义条件,交给 LLM 复盘);
+             或唯一未满足的是软性条件(优先/鼓励类),不否决但也不算符合。
 - `uncertain` ❓ — 没解析出条件,或 known/known 数太少。
 - `ineligible` ❌ — 任一硬性条件不满足(返回后建议仍可关注申报截止前条件放宽)。
 - `not_applicable` ⏭ — `triage_category` 判定为 新闻/规范/其它(非申报类),
@@ -192,6 +225,9 @@ print(parsed['triage_category'], parsed['triage_method'])  # apply / 'llm' 或 '
     {"level": 1, "marker": "三", "title": "支持标准"}
   ],
   "triage_category": "apply",
+  "triage_method": "rules",
+  "extract_method": "rules",
+  "llm_extract_added": 0,
   "stats": {"chars": 543, "paragraphs": 20, "conditions": 8}
 }
 ```
@@ -224,17 +260,33 @@ print(parsed['triage_category'], parsed['triage_method'])  # apply / 'llm' 或 '
 整组降级到 `pass`。匹配时,`unknown` / `review` 计入 `likely` 而非直接判 `eligible`,
 避免字段不全时被错判通过。
 
+**上下界**:一条原文同时给出下界和上界("不少于20人且不超过300人")会拆成两条
+条件分别核对,不再只取第一个数值(旧版会漏掉上界,500 人也算通过)。
+
 **资质别名**:政策中"中小企业"对应画像的"小微企业/中小微企业/中型企业"等;
 "高新技术企业"对应"国家高新技术企业/国高新/高企"。
+
+**划型类资质**:`中小企业/小微企业/中小型企业/中型企业/小型企业/微型企业/中小微企业`
+是**划型指标而非认证**,画像 `qualifications` 里没写不等于不满足(旧版会假 fail →
+整条政策被误判 `ineligible`)。现在:画像有 `revenue`/`headcount` → `review`
+(可按《中小企业划型标准规定》复核);两项都没有 → `unknown`;
+只有明显超出划型上限(**>1000 人且 >20 亿元**)才判 `fail`。
+"科技型中小企业"是评价类资质,不走此逻辑,仍按 `qualifications` 核对。
+
+**属地条件的市级证据**:只有"城市名出现在发文机关,或位于标题开头"才算**市级政策**;
+标题中间顺带提到的城市(省级政策的举例)不再把政策降级为市级——旧版会让
+同省异地企业被判确定性的 `fail`。
 
 ## CLI 用法
 
 ```bash
-# 跑样例(无参数): 自带申报通知 + profile → 输出 verdict=ineligible/likely
+# 跑样例(无参数): 自带申报通知 + profile → 输出 verdict=likely
 python scripts/company_matcher.py
 
-# 解析单文件(读 stdin,输出 JSON)
+# 解析单文件:stdin 或文件参数都可以,输出 JSON
 python scripts/policy_parser.py < policy.txt > parsed.json
+python scripts/policy_parser.py policy.txt > parsed.json
+# 编码自动识别(utf-8 → gb18030 兜底),Windows 控制台/BOM 不会乱码
 ```
 
 > 注:两个脚本均支持直接运行(`python scripts/xxx.py`)和包内导入
@@ -264,16 +316,27 @@ python scripts/policy_parser.py < policy.txt > parsed.json
 ## Verification
 
 ```bash
-# 单元测试 1: parser 端 → 8 条 conditions, 含 4 个结构化字段
+# 单元测试 1: parser 端 → 10 条 conditions, 含 4 个结构化字段
 python scripts/policy_parser.py
 
-# 单元测试 2: matcher 端 → verdict=ineligible/likely, 报告含"待复核"区
+# 单元测试 2: matcher 端 → verdict=likely, 报告含"需人工/LLM 复核"区
 python scripts/company_matcher.py
 
-# 端到端: 真实采集数据
+# 回归测试(仓库根 scripts/,含本 skill 的修复用例)
+python scripts/test_regressions.py
+
+# 评测:漏斗/覆盖率/候选预筛校准 + 与基线对比
+python scripts/eval_policy_analyzer.py
+python scripts/eval_policy_analyzer.py --golden eval/golden.example.jsonl   # P/R/F1
+
+# 端到端/诊断(同样在仓库根 scripts/,不在本 skill 的 scripts/ 下):
 python scripts/test_policy_analyzer_real.py
 python scripts/diagnose_sites.py     # 站点覆盖率诊断
 ```
+
+> 精度提升的正确顺序:先攒**标注集**(`eval/golden.example.jsonl` 目前只是
+> seed-synthetic 种子,需替换成真实人工标注) → 用 `--golden` 看每字段 P/R/F1
+> 与逐条 diff → 再决定是加规则还是开 LLM 补漏。
 
 ## 真实数据精度(v1.1, n=54)
 
@@ -299,16 +362,64 @@ python scripts/diagnose_sites.py     # 站点覆盖率诊断
   调用方配置 logging 后可见 debug/warning)。
 - `llm_triage` 依赖 `requests`(已在项目 requirements.txt),调用 OpenAI 兼容 API;
   未配置 `POLICY_LLM_API_KEY` 时自动跳过,回退规则。
+- `llm_extract`(v1.6.0 起)复用 `llm_triage.chat_json`,同样只需 `requests`;
+  模块缺失/未开启时 `parse_policy` 静默走纯正则。
 - `company_matcher` 仅依赖 Python 标准库 + `datetime`。
 - `scripts/__init__.py` 使目录可作为包导入,兼容直接脚本运行。
 - 不依赖 `gov-doc-collector`,但配合使用效果最好(同目录 `scripts/` 提供
-  `UnifiedFetcher`,输出 `detail` 直接喂给 `parse_from_detail`)。
+  `UnifiedFetcher`,输出 `detail` 直接喂给 `parse_from_detail`;
+  v1.6.0 起 `parse_from_detail` 会透传 `content_quality` / `content_usable`,
+  低质量正文(导航页/目录页)可据此跳过)。
 
 ## 依赖安装
 
-无外部依赖,Python 3.9+ 即可。
+核心解析/匹配无外部依赖,Python 3.9+ 即可。
+只有 LLM triage(`llm_triage.py`)需要 `requests`(已在项目 requirements.txt);
+未安装或未配置 `POLICY_LLM_API_KEY` 时自动跳过,走规则兜底,不影响其它能力。
 
 ## 更新日志
+
+### v1.6.0 (2026-09-13)
+- ✨ **LLM 条件抽取补漏(可选)**:`use_llm_extract` / `POLICY_LLM_EXTRACT=1`;
+  只在正则结构化条件少于 3 条时触发,每条须通过**原文 quote 回验**才采纳,
+  只补正则没有的 `(field, op, value)`,冲突保留正则
+- ✨ **抽取缓存**:按 (prompt 版本 + 模型 + 正文哈希) 落盘,重放不重新付费;
+  `llm_extract.clear_cache()` 可清理
+- 🔧 `llm_triage` 抽出公共入口 `chat_json()`(配置容错 + 熔断 + JSON 解析合一),
+  JSON 提取新增"括号配平"兜底(抽取类响应带嵌套结构)
+- ✨ **正文质量透传**:`parse_from_detail` 输出 `content_quality` / `content_usable`
+- 🐛 评测驱动修复两处漏抽:`未被列入经营异常名录` 归入 credit 条件;
+  法规类文种里出现"申报条件"章节 → 判为申报类(`_APPLY_SECTION_RE`)
+- 📊 **评测脚本**(仓库根):`scripts/eval_policy_analyzer.py`
+  (语料漏斗/覆盖率/候选预筛校准 + `eval/baseline.json` 基线 + 标注集 P/R/F1)
+- ✅ `test_regressions.py` 扩充到 77 用例(含 P0/P1 全部新增能力)
+
+### v1.5.0 (2026-09-13)
+- 🐛 **非法 LLM 配置不再拖垮解析**:`POLICY_LLM_TIMEOUT` 写成 `30s` 之类原先会
+  抛 `ValueError`,整条解析失败;现在告警并回退默认值
+- ✨ **LLM 熔断**:连续失败 3 次后本进程内停用 LLM(批量解析不再逐篇等满超时),
+  `reset_failure_state()` 可恢复
+- 🐛 **triage 误判修复(结论级)**:通知/公告分支原先"有 conditions 就算申报",
+  而条件常来自句级兜底,导致「检查工作的通知」「公布名单的通知」被判 `apply`;
+  现在改为**标题信号优先**(申报词 > 监管词 > 新闻词 > 结果公示),
+  且只有在正文抽到**实质条件**时才认作申报类
+- 🐛 **划型类资质假 fail 修复(结论级)**:`中小企业/小微企业` 等是划型指标而非认证,
+  画像 `qualifications` 未列时原先直接判硬性 `fail` → 整条政策误判 `ineligible`;
+  现按 `revenue`/`headcount` 复核(→ `review`),明显超上限才 `fail`
+- 🐛 **上下界条件不再丢**:`不少于20人且不超过300人` 原先只留第一个数值
+  (500 人也算通过),现拆成两条条件分别核对
+- 🐛 **funding 上限跨句误判**:`一次性奖励50万元,最高不超过500万元` 中的
+  50 万元被标成"上限";上限词现在只在**本小句**内判定
+- 🐛 **属地市级证据收紧**:标题中段提到某城市不再把省级政策降级为市级
+  (同省异地企业不再被误判硬性 `fail`),城市名在发文机关/标题开头才按市级判定
+- 🐛 **枚举拆分**:同一行内空格分隔的 `1. 申报书 2. 营业执照` 现在能拆开
+- 🔧 `eligible` 判定排除未满足的软性条件;只剩软性条件未满足 → `likely`
+- 🔧 `format_report` 容忍 funding 项缺 `value_wan`(不再 `KeyError`)
+- 🔧 `parse_from_detail` 空输入的 `validity` 结构与正常解析一致
+- 🔧 **CLI 真正能读输入**:`policy_parser.py` 支持 stdin / 文件参数,
+  编码 utf-8 → gb18030 兜底(原先只跑内置样例,文档与实现不符)
+- 🧹 删除 `detect_doc_type` 中不可达的"关于印发《X》的通知 → 通知"分支
+- ✅ 回归测试:`test_regressions.py` 新增 14 条修复用例(共 50 条)
 
 ### v1.4.0 (2026-08-03)
 - ✨ **属地条件推断**:`region` 条件不再一律 review——用政策 `issuer`/标题

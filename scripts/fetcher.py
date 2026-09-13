@@ -46,6 +46,23 @@ def detect_encoding(resp) -> str:
         return 'utf-8'
 
 
+def _same_dir(column: str, tpl: str) -> bool:
+    """分页 URL 模板是否属于该栏目(同目录)。
+
+    兼容两种旧写法:栏目写目录(`/list/` 或 `/list`)或写列表页文件
+    (`/list/index.html`);模板取其所在目录比较。
+    """
+    col = column or ''
+    if not col or not tpl:
+        return False
+    col_dir = col if col.endswith('/') else col.rsplit('/', 1)[0] + '/'
+    tpl_dir = (tpl.rsplit('/', 1)[0] + '/') if '/' in tpl else '/'
+    if col_dir == tpl_dir:
+        return True
+    # 栏目写成目录但没带尾斜杠(/list vs /list/index_{page}.html)
+    return col.rstrip('/') == tpl_dir.rstrip('/')
+
+
 class GovDocFetcher:
     def __init__(self, config_dir: str = None, verify_ssl: bool = True):
         """
@@ -75,10 +92,34 @@ class GovDocFetcher:
             configs = json.load(f)
         return configs.get(site_key)
 
-    # ---------- 分页 ----------
+    # ---------- 栏目 / 分页 ----------
 
-    def _page_urls(self, config: Dict, max_pages: Optional[int] = None) -> List[str]:
-        """根据配置的 pagination 生成待采集的页面 URL 列表(第 1 页恒为 base+search_path)。
+    def _columns(self, config: Dict) -> List[str]:
+        """站点配置里的栏目路径列表。
+
+        `search_path` 既可以是字符串(单栏目,兼容旧配置),也可以是数组
+        —— 申报公告往往分散在"通知公告 / 申报专区 / 政策法规"多个栏目,
+        只配一个栏目是踩不到申报通知的主因。另可用 `extra_paths` 追加栏目。
+        """
+        raw = config.get('search_path', '/')
+        cols = list(raw) if isinstance(raw, (list, tuple)) else [raw]
+        extra = config.get('extra_paths') or []
+        cols.extend(list(extra) if isinstance(extra, (list, tuple)) else [extra])
+        out, seen = [], set()
+        for c in cols:
+            c = (c or '').strip()
+            if not c:
+                continue
+            if not c.startswith('/'):
+                c = '/' + c
+            if c not in seen:
+                seen.add(c)
+                out.append(c)
+        return out or ['/']
+
+    def _column_page_urls(self, config: Dict, column: str,
+                          max_pages: Optional[int] = None) -> List[str]:
+        """单个栏目的分页 URL 列表(第 1 页恒为 base+column)。
 
         支持两种配置:
           {"pagination": {"type": "template", "url_template": "/list/index_{page}.html",
@@ -87,8 +128,11 @@ class GovDocFetcher:
           {"pagination": {"type": "query", "param": "page", "start": 2, "max_pages": 3}}
             → 第 2 页起追加 ?page=N(或 &page=N)
         start = 第 2 个 URL 里代入的页码,缺省 1。
+
+        多栏目时模板型分页只对"模板所属栏目"生效(模板以该栏目路径开头,
+        或使用 {column} 占位);不匹配的栏目只采第 1 页,避免翻到别的栏目上。
         """
-        base = config['base_url'] + config['search_path']
+        base = config['base_url'] + column
         pag = config.get('pagination') or {}
         total = pag.get('max_pages', 1) if max_pages is None else max_pages
         if total <= 1 or not pag:
@@ -96,17 +140,35 @@ class GovDocFetcher:
 
         start = pag.get('start', 1)
         urls = [base]
+        tpl = pag.get('url_template', '')
+        if pag.get('type') != 'query':
+            if '{column}' in tpl:
+                tpl = tpl.replace('{column}', column)
+            elif tpl and not _same_dir(column, tpl):
+                # 模板只对"它所属栏目"生效,否则多栏目配置会把别的栏目翻到
+                # 同一批 URL 上(重复请求 + 采错栏目)
+                logger.debug('栏目 %s 与 url_template(%s) 不在同一目录,该栏目只采第 1 页',
+                             column, tpl)
+                return [base]
         for i in range(1, total):
             page_no = start + i - 1
             if pag.get('type') == 'query':
                 sep = '&' if '?' in base else '?'
                 urls.append(f"{base}{sep}{pag.get('param', 'page')}={page_no}")
             else:
-                tpl = pag.get('url_template', '')
                 if not tpl:
                     break
                 path = tpl.replace('{page}', str(page_no))
                 urls.append(config['base_url'] + path)
+        return urls
+
+    def _page_urls(self, config: Dict, max_pages: Optional[int] = None,
+                   column: Optional[str] = None) -> List[str]:
+        """待采集页面 URL 列表。column 指定单个栏目;缺省拼接**所有**栏目。"""
+        cols = [column] if column else self._columns(config)
+        urls: List[str] = []
+        for col in cols:
+            urls.extend(self._column_page_urls(config, col, max_pages))
         return urls
 
     # ---------- TLS ----------
@@ -162,7 +224,7 @@ class GovDocFetcher:
 
     def fetch_list(self, site_key: str, level: str = "national",
                    max_pages: Optional[int] = None, **kwargs) -> List[Dict]:
-        """采集文档列表(支持分页,按 link 去重;空页即停)。
+        """采集文档列表(多栏目 + 分页,按 link 去重;单栏目空页即停)。
 
         Args:
             max_pages: 覆盖配置里的 pagination.max_pages;缺省用配置值(无配置=1 页)
@@ -173,17 +235,33 @@ class GovDocFetcher:
 
         items: List[Dict] = []
         seen = set()
-        for url in self._page_urls(config, max_pages):
-            page_items = self._fetch_page(url, config) or []
-            for it in page_items:
-                key = it.get('link') or it.get('title')
-                if key and key not in seen:
-                    seen.add(key)
-                    items.append(it)
-            logger.debug('站点 %s 分页 %s: %d 条', site_key, url, len(page_items))
-            if not page_items:
-                break  # 空页 → 后面不用翻了
+        for col in self._columns(config):
+            for url in self._column_page_urls(config, col, max_pages):
+                page_items = self._fetch_page(url, config) or []
+                for it in page_items:
+                    key = it.get('link') or it.get('title')
+                    if key and key not in seen:
+                        seen.add(key)
+                        # 记下来源栏目:下游(候选筛选/解析)可用栏目先验
+                        it.setdefault('source_path', col)
+                        items.append(it)
+                logger.debug('站点 %s 栏目 %s 分页 %s: %d 条',
+                             site_key, col, url, len(page_items))
+                if not page_items:
+                    break  # 本栏目空页 → 不再翻它后面的页(其它栏目继续)
         return items
+
+    def fetch_html(self, url: str, config: Optional[Dict] = None,
+                   timeout: int = 40) -> str:
+        """抓取任意页面 HTML(带编码检测/TLS 降级),供栏目探测等分析工具复用。
+
+        注意:不同于 _fetch_page,这里不解析列表、不做三级策略降级。
+        """
+        config = config or {}
+        resp = self._get_with_verify(url, config, timeout=timeout)
+        resp.raise_for_status()
+        resp.encoding = detect_encoding(resp)
+        return resp.text
 
     def fetch_detail(self, url: str) -> Dict:
         """
@@ -209,6 +287,8 @@ class GovDocFetcher:
                 'attachments': [],
                 'metadata': {},
                 'has_content': False,
+                'content_quality': {'score': 0, 'level': 'low', 'flags': ['fetch_error']},
+                'content_usable': False,
                 'error': str(e),
             }
 

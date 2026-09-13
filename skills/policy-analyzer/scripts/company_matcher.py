@@ -61,6 +61,14 @@ QUAL_ALIASES = {
     '科技型中小企业': ['科技型小微企业', '科小企业', '科技企业'],
 }
 
+# 划型类"资质":这不是认证,而是按营收/人数划型(《中小企业划型标准规定》),
+# 画像 qualifications 里没写不等于不满足,直接判 fail 会把合规企业假否决
+SIZE_QUALIFICATIONS = {'中小企业', '中小微企业', '中小型企业', '中型企业',
+                       '小型企业', '微型企业', '小微企业'}
+# 各行业划型上限的最高档(工业:1000 人 / 20 亿元),两项都超出才可确定"不属中小微"
+SIZE_MAX_HEADCOUNT = 1000
+SIZE_MAX_REVENUE_WAN = 200000.0
+
 # ---------- 属地推断(省级/直辖市 + 主要地级市→省映射) ----------
 PROVINCE_NAMES = [
     '北京', '天津', '上海', '重庆',
@@ -83,16 +91,18 @@ CITY_TO_PROVINCE = {
 }
 
 
-def _policy_regions(text: str) -> set:
-    """从政策发文机关/标题中识别辖区名(省份、直辖市、主要城市)。"""
-    found = set()
-    for n in PROVINCE_NAMES:
-        if n in text:
-            found.add(n)
-    for c in CITY_TO_PROVINCE:
-        if c in text:
-            found.add(c)
-    return found
+def _policy_scope(issuer: str, title: str):
+    """从发文机关/标题推断政策辖区 → (省级集合, 市级集合)。
+
+    只有"城市名出现在发文机关,或位于标题开头"才算**市级政策**的强证据:
+    标题中间顺带提到的城市(常见于省级政策的举例)不应把政策降级为市级,
+    否则异地企业会被判确定性的 fail,而不是交给上层 review。
+    """
+    issuer = issuer or ''
+    title = title or ''
+    provinces = {n for n in PROVINCE_NAMES if n in issuer or n in title}
+    cities = {c for c in CITY_TO_PROVINCE if c in issuer or title.startswith(c)}
+    return provinces, cities
 
 
 def _profile_provinces(region: str) -> set:
@@ -164,6 +174,36 @@ def _company_age(profile: Dict) -> Optional[float]:
     return round(days / 365.0, 2)
 
 
+def _to_float(value) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _check_size_qualification(profile: Dict, wanted: List[str], fail_status) -> Dict:
+    """划型类资质("中小企业"等)按营收/人数口径复核,而不是按认证判定。"""
+    label = '、'.join(wanted)
+    revenue = _to_float(profile.get('revenue'))
+    headcount = _to_float(profile.get('headcount'))
+    if revenue is None and headcount is None:
+        return {'status': 'unknown',
+                'reason': f'画像缺少 revenue/headcount,无法判定是否属「{label}」划型'}
+    if (revenue is not None and revenue > SIZE_MAX_REVENUE_WAN
+            and headcount is not None and headcount > SIZE_MAX_HEADCOUNT):
+        return {'status': fail_status(),
+                'reason': f"营收 {revenue:.0f} 万元、{headcount:.0f} 人,超出划型上限,"
+                          f"不属「{label}」"}
+    detail = []
+    if revenue is not None:
+        detail.append(f"营收 {revenue:.0f} 万元")
+    if headcount is not None:
+        detail.append(f"{headcount:.0f} 人")
+    return {'status': 'review',
+            'reason': f"「{label}」为划型指标(非认证),画像未列该资质;"
+                      f"可按{'、'.join(detail)}依《中小企业划型标准规定》复核"}
+
+
 def check_condition(cond: Dict, profile: Dict, context: Optional[Dict] = None) -> Dict:
     """单条结构化条件 vs 企业画像 → {status, reason}
 
@@ -185,10 +225,8 @@ def check_condition(cond: Dict, profile: Dict, context: Optional[Dict] = None) -
                 'reason': '语义条件,需结合企业主营业务人工/LLM 判断'}
 
     if field == 'qualification':
-        quals = profile.get('qualifications')
-        if quals is None:
-            return {'status': 'unknown', 'reason': '画像缺少 qualifications'}
         wanted = value if isinstance(value, list) else [value]
+        quals = profile.get('qualifications') or []
         # 条件含"或"→任一命中;否则全部命中。优先取 classify_condition 标注的 any_mode,
         # 兼容旧数据时回退到 value_text 中是否含"或"
         any_mode = cond.get('any_mode')
@@ -198,6 +236,12 @@ def check_condition(cond: Dict, profile: Dict, context: Optional[Dict] = None) -
         ok = bool(hits) if any_mode else len(hits) == len(wanted)
         if ok:
             return {'status': 'pass', 'reason': f"已有资质: {','.join(hits)}"}
+        # 划型类指标(中小企业/小微企业…)不是认证,画像没列不等于不满足:
+        # 优先按营收/人数口径复核,再谈"缺资质"
+        if all(w in SIZE_QUALIFICATIONS for w in wanted):
+            return _check_size_qualification(profile, wanted, fail_status)
+        if profile.get('qualifications') is None:
+            return {'status': 'unknown', 'reason': '画像缺少 qualifications'}
         # 资质条件常与专利等并列为"或"关系,留给汇总层判断;单条先报 fail
         return {'status': fail_status(),
                 'reason': f"缺少资质: {','.join(w for w in wanted if w not in hits)}"}
@@ -215,17 +259,14 @@ def check_condition(cond: Dict, profile: Dict, context: Optional[Dict] = None) -
             return {'status': 'unknown', 'reason': '画像缺少 region'}
         # 用发文机关/标题推断政策辖区;能确定且画像可解析 → 给出确定结论,
         # 否则保持 review 交给上层复核
-        ctx_text = ' '.join(filter(
-            None, [(context or {}).get('issuer'), (context or {}).get('title')]))
-        pol_regions = _policy_regions(ctx_text) if ctx_text else set()
+        pol_provs, pol_cities = _policy_scope(
+            (context or {}).get('issuer'), (context or {}).get('title'))
         cond_desc = (cond.get('value_text') or cond.get('text', ''))[:30]
-        if not pol_regions:
+        if not pol_provs and not pol_cities:
             return {'status': 'review',
                     'reason': f"属地条件「{cond_desc}」,发文机关未识别出辖区,"
                               f"需确认企业注册地({region})是否在辖区内"}
 
-        pol_provs = {p for p in pol_regions if p in PROVINCE_NAMES}
-        pol_cities = {c for c in pol_regions if c in CITY_TO_PROVINCE}
         prof_provs = _profile_provinces(region)
         prof_cities = {c for c in CITY_TO_PROVINCE if c in region}
 
@@ -348,17 +389,22 @@ def match_policy(parsed_policy: Dict, profile: Dict) -> Dict:
             reviews.append({'text': c['condition']['text'],
                             'reason': c['result']['reason']})
 
-    decisive = summary['pass'] + summary['fail']
     if summary['fail'] > 0:
         verdict = 'ineligible'           # 任一硬性条件不满足
     elif not conditions:
         verdict = 'uncertain'            # 没解析出条件,无从判断
-    elif summary['unknown'] == 0 and summary['review'] == 0:
-        verdict = 'eligible'             # 全部硬性条件确定通过
-    elif summary['pass'] > 0 and summary['pass'] >= summary['unknown'] + summary['review']:
+    elif summary['unknown'] == 0 and summary['review'] == 0 and summary['soft_fail'] == 0:
+        verdict = 'eligible'             # 全部硬性条件确定通过,且无未满足的软性条件
+    elif summary['pass'] > 0 and summary['pass'] >= (summary['unknown']
+                                                     + summary['review']
+                                                     + summary['soft_fail']):
         verdict = 'likely'               # 多数已核通过,少量待补/待审
     elif summary['pass'] == 0 and summary['review'] > 0 and summary['review'] == len(checks):
         # 全部都是语义类条件(industry/other)→ 给'likely'让上层 Agent 复核
+        verdict = 'likely'
+    elif (summary['pass'] == 0 and summary['soft_fail'] > 0
+          and summary['soft_fail'] == len(checks)):
+        # 唯一没满足的是软性条件(优先/鼓励)→ 不否决,但也不算"符合"
         verdict = 'likely'
     else:
         verdict = 'uncertain'
@@ -449,15 +495,19 @@ def format_report(match: Dict) -> str:
     for c in match['checks']:
         st = c['result']['status']
         lines.append(f"| {STATUS_MARKS[st]} | {c['condition']['text'][:60]} | {c['result']['reason']} |")
-    if match['funding']:
+    if match.get('funding'):
         lines.append('')
         lines.append('## 可获支持')
         for f in match['funding']:
-            if f['kind'] == 'ratio':
-                lines.append(f"- 按比例 {f['ratio_pct']}%: {f['text']}")
+            text = f.get('text', '')
+            if f.get('kind') == 'ratio' and f.get('ratio_pct') is not None:
+                lines.append(f"- 按比例 {f['ratio_pct']}%: {text}")
             else:
-                cap = '(上限)' if f['kind'] == 'cap' else ''
-                lines.append(f"- {f['value_wan']:.0f} 万元{cap}: {f['text']}")
+                cap = '(上限)' if f.get('kind') == 'cap' else ''
+                wan = f.get('value_wan')
+                # 兼容外部传入/旧版 JSON:缺 value_wan 时不要抛 KeyError
+                amount = f"{wan:.0f} 万元{cap}" if wan is not None else '(金额未解析)'
+                lines.append(f"- {amount}: {text}")
     if match['missing_fields']:
         lines.append('')
         lines.append(f"## 待补企业信息\n\n补全后可确定结论: `{'`, `'.join(match['missing_fields'])}`")

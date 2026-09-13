@@ -34,8 +34,14 @@ DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 DEFAULT_MODEL = 'gpt-4o-mini'
 DEFAULT_TIMEOUT = 15
 TEXT_SNIPPET_MAX = 1500  # 送入 LLM 的正文片段最大字符数
+# 连续失败达到该次数后,本进程内停用 LLM:
+# 批量解析时若 key/base_url 不可用,会逐篇等满 timeout,这里做短路熔断
+FAILURE_THRESHOLD = 3
 
 VALID_CATEGORIES = ('apply', 'regulate', 'news', 'other')
+
+# 熔断状态(模块级;调用方可随时 reset_failure_state() 重置)
+_failure_count = 0
 
 # 四档定义(写入 prompt)
 CATEGORY_DEFINITIONS = """\
@@ -48,16 +54,56 @@ CATEGORY_DEFINITIONS = """\
 - other:     无法归入以上三类的其它内容。"""
 
 
+def _env_int(name: str, default: int) -> int:
+    """读整数环境变量;缺失或非法时回退默认值(不抛异常)。
+
+    环境变量写错(如 POLICY_LLM_TIMEOUT=30s)不应让整条解析链路崩掉:
+    LLM 只是增强项,配置问题一律降级为"走规则"。
+    """
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning('%s=%r 不是合法整数,回退默认值 %s', name, raw, default)
+        return default
+
+
 def _get_config(**overrides) -> Dict:
     """合并配置:参数 > 环境变量 > 默认值。"""
     cfg = {
         'base_url': os.environ.get('POLICY_LLM_BASE_URL', DEFAULT_BASE_URL).rstrip('/'),
         'api_key': os.environ.get('POLICY_LLM_API_KEY', ''),
         'model': os.environ.get('POLICY_LLM_MODEL', DEFAULT_MODEL),
-        'timeout': int(os.environ.get('POLICY_LLM_TIMEOUT', str(DEFAULT_TIMEOUT))),
+        'timeout': _env_int('POLICY_LLM_TIMEOUT', DEFAULT_TIMEOUT),
     }
     cfg.update({k: v for k, v in overrides.items() if v is not None})
     return cfg
+
+
+def resolve_model(**config_overrides) -> str:
+    """当前生效的模型名(供缓存 key / 日志使用)。"""
+    return _get_config(**config_overrides)['model']
+
+
+def _record_failure() -> None:
+    global _failure_count
+    _failure_count += 1
+    if _failure_count == FAILURE_THRESHOLD:
+        logger.warning('LLM triage 连续失败 %d 次,本进程内停用 LLM,后续全部走规则兜底',
+                       _failure_count)
+
+
+def _record_success() -> None:
+    global _failure_count
+    _failure_count = 0
+
+
+def reset_failure_state() -> None:
+    """重置熔断计数(API 恢复后可由调用方显式恢复)。"""
+    global _failure_count
+    _failure_count = 0
 
 
 def build_prompt(title: str, text: str, doc_type: str,
@@ -113,7 +159,93 @@ def _extract_json(content: str) -> Optional[Dict]:
             return json.loads(m.group(0))
         except json.JSONDecodeError:
             pass
+    # 兜底:扫描第一个括号配平的 JSON 对象(抽取类响应含嵌套数组/对象)
+    return _balanced_json(content)
+
+
+def _balanced_json(content: str) -> Optional[Dict]:
+    """从混杂文本里找出第一个括号配平的 JSON 对象(跳过字符串内的括号)。"""
+    start = content.find('{')
+    while start != -1:
+        depth = 0
+        in_str = esc = False
+        for i in range(start, len(content)):
+            ch = content[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == '\\':
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(content[start:i + 1])
+                    except json.JSONDecodeError:
+                        break
+        start = content.find('{', start + 1)
     return None
+
+
+def chat_json(messages: List[Dict], *, max_tokens: int = 200,
+              temperature: float = 0.0, response_format: Optional[Dict] = None,
+              log_tag: str = 'LLM', **config_overrides) -> Optional[Dict]:
+    """调用 OpenAI 兼容 Chat Completions 并解析出 JSON 对象;失败返回 None。
+
+    统一收敛:配置读取(含非法值容错)、请求、JSON 提取、失败熔断计数都在这里,
+    `classify_triage_with_llm` 与 `llm_extract` 共用,避免各写一套。
+    """
+    cfg = _get_config(**config_overrides)
+    if not cfg['api_key']:
+        logger.debug('%s: POLICY_LLM_API_KEY 未配置,跳过', log_tag)
+        return None
+
+    url = f"{cfg['base_url']}/chat/completions"
+    headers = {
+        'Authorization': f"Bearer {cfg['api_key']}",
+        'Content-Type': 'application/json',
+    }
+    payload = {
+        'model': cfg['model'],
+        'messages': messages,
+        'temperature': temperature,
+        'max_tokens': max_tokens,
+    }
+    if response_format is not None:
+        payload['response_format'] = response_format  # 支持的模型会强制 JSON
+
+    try:
+        logger.debug('%s 请求: model=%s, max_tokens=%d', log_tag, cfg['model'], max_tokens)
+        resp = requests.post(url, headers=headers, json=payload, timeout=cfg['timeout'])
+        resp.raise_for_status()
+        data = resp.json()
+        content = data['choices'][0]['message']['content']
+        parsed = _extract_json(content)
+        if not parsed:
+            logger.warning('%s 返回无法解析为 JSON: %s', log_tag, content[:200])
+            _record_failure()
+            return None
+        _record_success()
+        return parsed
+    except requests.exceptions.Timeout:
+        logger.warning('%s 请求超时(%ss),回退', log_tag, cfg['timeout'])
+        _record_failure()
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.warning('%s 请求失败: %s,回退', log_tag, e)
+        _record_failure()
+        return None
+    except (KeyError, IndexError, ValueError, TypeError) as e:
+        logger.warning('%s 响应解析失败: %s,回退', log_tag, e)
+        _record_failure()
+        return None
 
 
 def classify_triage_with_llm(title: str, text: str, doc_type: str,
@@ -132,60 +264,33 @@ def classify_triage_with_llm(title: str, text: str, doc_type: str,
         {'category': str, 'reason': str, 'confidence': float, 'model': str}
         LLM 不可用/出错时返回 None(由调用方回退规则)。
     """
+    if not is_llm_available(**config_overrides):
+        return None
     cfg = _get_config(**config_overrides)
-    if not cfg['api_key']:
-        logger.debug('POLICY_LLM_API_KEY 未配置,跳过 LLM 分类')
-        return None
-
     messages = build_prompt(title, text, doc_type, conditions)
-    url = f"{cfg['base_url']}/chat/completions"
-    headers = {
-        'Authorization': f"Bearer {cfg['api_key']}",
-        'Content-Type': 'application/json',
-    }
-    payload = {
+    parsed = chat_json(messages, max_tokens=200, temperature=0.0,
+                       response_format={'type': 'json_object'},
+                       log_tag='LLM triage', **config_overrides)
+    if not parsed:
+        return None
+    category = str(parsed.get('category', '')).strip().lower()
+    if category not in VALID_CATEGORIES:
+        logger.warning('LLM triage 返回未知 category=%s,回退规则', category)
+        _record_failure()
+        return None
+    return {
+        'category': category,
+        'reason': str(parsed.get('reason', ''))[:100],
+        'confidence': float(parsed.get('confidence', 0.0)),
         'model': cfg['model'],
-        'messages': messages,
-        'temperature': 0.0,  # 分类任务用确定性输出
-        'max_tokens': 200,
-        'response_format': {'type': 'json_object'},  # 强制 JSON(支持的模型生效)
     }
-
-    try:
-        logger.debug('LLM triage 请求: model=%s, title=%s', cfg['model'], (title or '')[:40])
-        resp = requests.post(url, headers=headers, json=payload,
-                             timeout=cfg['timeout'])
-        resp.raise_for_status()
-        data = resp.json()
-        content = data['choices'][0]['message']['content']
-        parsed = _extract_json(content)
-        if not parsed:
-            logger.warning('LLM 返回无法解析为 JSON: %s', content[:200])
-            return None
-        category = str(parsed.get('category', '')).strip().lower()
-        if category not in VALID_CATEGORIES:
-            logger.warning('LLM 返回未知 category=%s,内容: %s', category, content[:200])
-            return None
-        return {
-            'category': category,
-            'reason': str(parsed.get('reason', ''))[:100],
-            'confidence': float(parsed.get('confidence', 0.0)),
-            'model': cfg['model'],
-        }
-    except requests.exceptions.Timeout:
-        logger.warning('LLM triage 请求超时(%ss),回退规则', cfg['timeout'])
-        return None
-    except requests.exceptions.RequestException as e:
-        logger.warning('LLM triage 请求失败: %s,回退规则', e)
-        return None
-    except (KeyError, IndexError, ValueError, TypeError) as e:
-        logger.warning('LLM triage 响应解析失败: %s,回退规则', e)
-        return None
 
 
 def is_llm_available(**config_overrides) -> bool:
-    """快速判断 LLM 是否可用(API Key 是否配置)。"""
+    """快速判断 LLM 是否可用(API Key 已配置,且未因连续失败被熔断)。"""
     cfg = _get_config(**config_overrides)
+    if _failure_count >= FAILURE_THRESHOLD:
+        return False
     return bool(cfg['api_key'])
 
 

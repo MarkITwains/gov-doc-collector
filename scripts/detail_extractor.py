@@ -81,6 +81,78 @@ KEYWORDS_OF_DATE = ['成文日期', '发布日期', '发文日期', '印发日�
 # 块级元素(正文按最内层块级元素收集,见 _extract_text)
 BLOCK_TAGS = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'li']
 
+# ---------- 正文质量评估(P1-1) ----------
+# 真实语料里混进过"工作职责"栏目页、"党务公开目录"页(导航文本重复两遍):
+# 这类正文会让解析器抽出 0 个字段,还会污染评测分母。这里给正文打分,
+# 低分正文打上 content_quality/ content_usable 标记,由调用方决定丢弃与否。
+NAV_NOISE_WORDS = [
+    '无障碍浏览', '网站地图', '主办单位', '版权所有', 'ICP备', '政府网站标识码',
+    '工作职责', '联系我们', '相关推荐', '相关链接', '友情链接', '返回顶部',
+    '上一篇', '下一篇', '打印本页', '关闭窗口', '分享到', '当前位置',
+    '政务公开', '政务服务', '互动交流', '专题专栏',
+]
+SENTENCE_PUNCT_RE = re.compile(r'[。;；!！?？]')
+SHORT_TEXT_CHARS = 300
+_QUALITY_LOW = 55
+_QUALITY_HIGH = 80
+
+
+def _duplicate_ratio(paragraphs: List[str]) -> float:
+    """段落重复率(导航页/目录页常把同一批链接重复两遍)。"""
+    if len(paragraphs) < 4:
+        return 0.0
+    keys = [p[:40] for p in paragraphs]
+    return (len(keys) - len(set(keys))) / len(keys)
+
+
+def assess_content_quality(text: str) -> Dict:
+    """给正文打质量分 → {'score': 0-100, 'level': high|medium|low, 'flags': [...]}。
+
+    用于识别"错采的正文":栏目页/导航页/目录页/只有一行字的页面。
+    阈值有意宽松:宁可让个别正常短通知落进 medium,也不要把真政策判成 low。
+    """
+    text = (text or '').strip()
+    flags: List[str] = []
+    penalty = 0
+    if not text:
+        return {'score': 0, 'level': 'low', 'flags': ['empty']}
+
+    n = len(text)
+    paragraphs = [p for p in re.split(r'\n+', text) if p.strip()]
+    avg_para = n / len(paragraphs) if paragraphs else n
+
+    if n < SHORT_TEXT_CHARS:
+        penalty += 40
+        flags.append(f'正文过短({n}字)')
+
+    nav_hits = [w for w in NAV_NOISE_WORDS if w in text]
+    if nav_hits:
+        penalty += min(30, 8 * len(nav_hits))
+        flags.append('导航/模板词: ' + '、'.join(nav_hits[:4]))
+
+    if len(paragraphs) <= 2 and n >= 600:
+        penalty += 20
+        flags.append('几乎无分段(疑似整页抓取)')
+    if n >= SHORT_TEXT_CHARS and avg_para < 20:
+        # 只在正文够长时判"过碎":短通知本来就有很多一行式条目,
+        # 否则会和"正文过短"重复扣分,把正常短通知压到 low
+        penalty += 15
+        flags.append(f'段落过碎(平均 {avg_para:.0f} 字/段)')
+
+    dup = _duplicate_ratio(paragraphs)
+    if dup > 0.3:
+        penalty += 25
+        flags.append(f'段落重复率 {dup:.0%}(疑似导航/目录)')
+
+    punct = len(SENTENCE_PUNCT_RE.findall(text))
+    if n >= 300 and punct * 100.0 / n < 1.0:
+        penalty += 15
+        flags.append(f'句读过少({punct} 个/ {n} 字,疑似罗列式导航)')
+
+    score = max(0, min(100, 100 - penalty))
+    level = 'high' if score >= _QUALITY_HIGH else 'medium' if score >= _QUALITY_LOW else 'low'
+    return {'score': score, 'level': level, 'flags': flags}
+
 
 def _strip_noise(soup: BeautifulSoup) -> None:
     """原地删除噪声元素"""
@@ -271,8 +343,11 @@ def extract_detail(html: str, url: str, base_url: str = '') -> Dict:
           'attachments': List[Dict],  # 附件列表
           'metadata': Dict,           # 元数据
           'has_content': bool,        # 是否识别到正文
+          'content_quality': Dict,    # 正文质量 {score, level, flags}(P1-1)
+          'content_usable': bool,     # has_content 且质量非 low → 可喂给解析器
         }
     """
+    empty_quality = {'score': 0, 'level': 'low', 'flags': ['empty']}
     if not html or BeautifulSoup is None:
         return {
             'url': url,
@@ -282,6 +357,8 @@ def extract_detail(html: str, url: str, base_url: str = '') -> Dict:
             'attachments': [],
             'metadata': {},
             'has_content': False,
+            'content_quality': empty_quality,
+            'content_usable': False,
         }
 
     soup = BeautifulSoup(html, 'html.parser')
@@ -295,6 +372,7 @@ def extract_detail(html: str, url: str, base_url: str = '') -> Dict:
     root = _find_content_root(soup)
     if not root:
         text = soup.get_text('\n', strip=True)
+        quality = assess_content_quality(text)
         return {
             'url': url,
             'content_text': text,
@@ -303,6 +381,8 @@ def extract_detail(html: str, url: str, base_url: str = '') -> Dict:
             'attachments': pre_attachments,
             'metadata': _extract_metadata(html, soup),
             'has_content': False,
+            'content_quality': quality,
+            'content_usable': False,
         }
 
     content_text = _extract_text(root)
@@ -314,6 +394,8 @@ def extract_detail(html: str, url: str, base_url: str = '') -> Dict:
             seen.add(a['url'])
             uniq.append(a)
     metadata = _extract_metadata(html, soup)
+    quality = assess_content_quality(content_text)
+    has_content = len(content_text) >= 100
 
     return {
         'url': url,
@@ -322,7 +404,10 @@ def extract_detail(html: str, url: str, base_url: str = '') -> Dict:
         'word_count': len(content_text),
         'attachments': uniq,
         'metadata': metadata,
-        'has_content': len(content_text) >= 100,
+        'has_content': has_content,
+        'content_quality': quality,
+        # 注意: has_content 语义不变(是否找到正文容器),是否可解析用 content_usable
+        'content_usable': bool(has_content and quality['level'] != 'low'),
     }
 
 
