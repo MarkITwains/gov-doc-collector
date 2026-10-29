@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """列表解析器:HTML 选择器 / XML feed / JSON API 三种格式"""
 import json
+import logging
 import re
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional
 from urllib.parse import urljoin
+
+logger = logging.getLogger(__name__)
 
 ATOM = '{http://www.w3.org/2005/Atom}'
 
@@ -28,7 +31,15 @@ def normalize_date(raw: Optional[str]) -> Optional[str]:
     s = str(raw).strip()
     m = re.search(r'(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})', s)
     if m:
-        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        # 校验月/日范围(含闰年/各月天数);非法日期(2026-13-45 / 2026-02-30)
+        # 不臆造为合法 ISO,原样返回
+        try:
+            import datetime as _dt
+            _dt.date(y, mo, d)
+            return f"{y}-{mo:02d}-{d:02d}"
+        except ValueError:
+            return s
     # RFC822 / RSS pubDate: "Mon, 01 Jun 2026 ..."
     m = re.search(r'\b(\d{1,2})\s+([A-Za-z]{3,9})\w*\.?,?\s+(\d{4})\b', s)
     if m and m.group(2).lower()[:3] in _EN_MONTHS:
@@ -46,14 +57,20 @@ def parse_selector(element, selector: str) -> Optional[str]:
     return elem.get_text(strip=True) if elem else None
 
 
-def extract_items(html_content: str, config: Dict) -> List[Dict]:
-    """从 HTML 提取列表项(链接绝对化、日期归一化)"""
+def extract_items(html_content: str, config: Dict,
+                  page_url: Optional[str] = None) -> List[Dict]:
+    """从 HTML 提取列表项(链接绝对化、日期归一化)。
+
+    page_url: 实际抓取到的列表页 URL,相对链接按它(而非 base_url 根)解析,
+              避免 ./202606/t123.html 丢掉栏目路径段。缺省回退 base_url(向后兼容)。
+    """
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(html_content, 'html.parser')
 
     items = []
     selectors = config['selectors']
     base_url = config['base_url']
+    join_base = page_url or base_url
     min_title_len = int(config.get('min_title_len', DEFAULT_MIN_TITLE_LEN))
 
     for elem in soup.select(selectors['list']):
@@ -62,7 +79,10 @@ def extract_items(html_content: str, config: Dict) -> List[Dict]:
             if key in selectors:
                 value = parse_selector(elem, selectors[key])
                 if key == 'link' and value:
-                    value = urljoin(base_url, value)
+                    value = urljoin(join_base, value)
+                    # 丢弃 javascript:/mailto: 等非 http(s) 链接
+                    if not value.lower().startswith(('http://', 'https://')):
+                        value = None
                 if key == 'date' and value:
                     value = normalize_date(value)
                 item[key] = value
@@ -76,7 +96,12 @@ def extract_items(html_content: str, config: Dict) -> List[Dict]:
 
 def parse_xml_feed(xml_content: str) -> List[Dict]:
     """解析 XML RSS/Atom feed(兼容 RSS <link> 文本与 Atom <link href> 属性)"""
-    root = ET.fromstring(xml_content)
+    try:
+        root = ET.fromstring(xml_content)
+    except ET.ParseError as e:
+        # 畸形/截断 feed 不应中断采集,返回空列表
+        logger.warning('XML feed 解析失败,返回空列表: %s', e)
+        return []
     items = []
 
     nodes = root.findall('.//item') or root.findall(f'.//{ATOM}entry')
@@ -126,12 +151,21 @@ def _walk_path(data, path: str):
     return cur
 
 
-def parse_json_api(json_content: str, mappings: Dict) -> List[Dict]:
+def parse_json_api(json_content: str, mappings: Dict,
+                   base_url: str = '', min_title_len: Optional[int] = None
+                   ) -> List[Dict]:
     """解析 JSON API 响应。
 
     mappings 示例:
       {"items_path": "data.result[0].list",
        "fields": {"title": "name", "link": "url", "date": "pub_time"}}
+
+    与 HTML 路径对齐(链接绝对化、日期归一化、丢弃无/短标题)为**可选**行为,
+    由新增参数开启(缺省关闭,保持原始取值的向后兼容):
+      base_url:       非空时相对链接按它绝对化;并丢弃非 http(s) 链接,
+                      且丢弃无标题/无链接的条目(对齐 extract_items)。
+      min_title_len:  给定时按阈值丢弃过短标题;None 表示不按长度过滤。
+    只要 base_url 或 min_title_len 任一给定,就启用日期归一化与过滤。
     """
     data = json.loads(json_content)
 
@@ -143,11 +177,35 @@ def parse_json_api(json_content: str, mappings: Dict) -> List[Dict]:
     if not isinstance(items_data, list):
         return []
 
+    post_process = bool(base_url) or (min_title_len is not None)
+    threshold = int(min_title_len) if min_title_len is not None else 0
+
     items = []
     for item in items_data:
         entry = {}
         for target, source in mappings.get('fields', {}).items():
             entry[target] = _walk_path(item, source)
-        items.append(entry)
+
+        if not post_process:
+            items.append(entry)
+            continue
+
+        # 链接绝对化 + 丢弃非 http(s)(与 extract_items 对齐)
+        link = entry.get('link')
+        if link is not None:
+            if base_url:
+                link = urljoin(base_url, link)
+            if not str(link).lower().startswith(('http://', 'https://')):
+                link = None
+            entry['link'] = link
+
+        # 日期归一化
+        if entry.get('date') is not None:
+            entry['date'] = normalize_date(entry['date'])
+
+        # 过滤:必须有标题和链接,标题长度达标(与 HTML 路径一致)
+        title = entry.get('title')
+        if title and entry.get('link') and len(str(title)) >= threshold:
+            items.append(entry)
 
     return items

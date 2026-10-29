@@ -48,7 +48,7 @@
 
 - ✅ **评测闭环**:`eval_policy_analyzer.py` 输出漏斗、字段覆盖率、候选预筛校准(精确率/召回率)、
   标注集 P/R/F1,并与 `eval/baseline.json` 基线对比;`--fail-on-drop` 可直接进 CI
-- ✅ **80 条离线回归用例**:`python scripts/test_regressions.py`(含 MCP 协议握手,不需要网络)
+- ✅ **181 条离线回归用例**:`python scripts/test_regressions.py`(含 MCP 协议握手与 v1.9.0 核心审计用例,不需要网络)
 
 ## 🚀 快速开始
 
@@ -59,7 +59,7 @@ cd gov-doc-collector
 pip install -r requirements.txt
 playwright install chromium     # 可选:~430MB,只有 need_js 站点需要
 
-# 1) 离线自检(80 用例,不联网)
+# 1) 离线自检(181 用例,不联网)
 python scripts/test_regressions.py
 
 # 2) 看真实语料基线(漏斗 / 覆盖率 / 质量分布)
@@ -180,7 +180,7 @@ python scripts/find_channels.py --level national --all --limit 5 --json
 # 评测(见上一节)
 python scripts/eval_policy_analyzer.py
 
-# 离线回归测试(80 用例,含 MCP 协议握手)
+# 离线回归测试(181 用例,含 MCP 协议握手)
 python scripts/test_regressions.py
 ```
 
@@ -224,8 +224,9 @@ print(parsed['triage_category'])        # apply / regulate / news / other
 print(parsed['conditions'][:2])         # 结构化条件(字段/运算符/值/是否硬性)
 print(parsed['validity']['deadline'])   # 申报截止日
 
-match = match_with_triage(parsed, profile)      # 企业画像 vs 政策
-print(match['verdict'], match['score'])         # eligible/likely/uncertain/ineligible/not_applicable
+match = match_with_triage(parsed, profile)      # 企业画像 vs 政策(可传 today='YYYY-MM-DD' 固定基准日)
+print(match['verdict'], match['score'])         # eligible/likely/uncertain/ineligible/not_applicable/expired
+print(match['eligibility_verdict'])             # 已截止(expired)时保留的原资格结论
 print(format_report(match))                     # 可直接推送的 Markdown 报告
 ```
 
@@ -333,7 +334,7 @@ search_path[]  →  标题/URL/栏目先验  →  only_apply  →  content_usabl
 
 ## 📈 当前状态
 
-**版本**:v1.8.0(2026-09-13,详见 [CHANGELOG.md](CHANGELOG.md))
+**版本**:v1.9.0(2026-10-29,详见 [CHANGELOG.md](CHANGELOG.md))
 
 | 指标 | 数值 |
 |---|---|
@@ -342,7 +343,7 @@ search_path[]  →  标题/URL/栏目先验  →  only_apply  →  content_usabl
 | 基础可用 (plain requests) | 44/61 (72%) |
 | 列表记录 | 3380 条真实政策 |
 | 详情提取 | 30+ 容器选择器,自动元数据 + 附件 + 正文质量 |
-| 离线回归用例 | 80(含 MCP 协议握手) |
+| 离线回归用例 | 181(含 MCP 协议握手) |
 
 ### 国家部委 (22/30 可用)
 

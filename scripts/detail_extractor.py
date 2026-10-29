@@ -7,7 +7,7 @@
 import re
 import warnings
 from typing import Dict, List, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 warnings.filterwarnings('ignore')
 
@@ -77,6 +77,25 @@ ATTACHMENT_SELECTORS = ['div.attachment-list', 'div.attachment', 'div#attachment
 # 元数据正则
 ISSUE_DATE_RE = re.compile(r'(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})[日]?')
 KEYWORDS_OF_DATE = ['成文日期', '发布日期', '发文日期', '印发日期', '发布时间']
+
+# 发文机关识别(DETAIL-3):合法机关名含这些标记之一;媒体署名不是发文机关
+ORGAN_MARKER_RE = re.compile(r'[部委厅局院府会办司署]|政府|中心|管委|办公室|银行|海关')
+MEDIA_NAME_RE = re.compile(r'日报|晚报|新华社|电视台|广播|网$|客户端|传媒|新闻|融媒|通讯社|杂志|周刊')
+# 发文机关 meta 名(按优先级:先含机关名的字段,最后才看可能是编辑/记者的 author)
+ISSUER_META_NAMES = ['Department', 'ContentSource', 'Creator', 'ArticleAuthor', 'author']
+
+# 纯日期行(DETAIL-4):整行只有一个 YYYY年M月D日
+DATE_ONLY_LINE_RE = re.compile(r'^\s*(\d{4})年(\d{1,2})月(\d{1,2})日\s*$')
+
+
+def _is_organ_name(value: str) -> bool:
+    """判断一个候选值是否像发文机关(含机关标记且不是媒体名)。"""
+    if not value:
+        return False
+    v = value.strip()
+    if MEDIA_NAME_RE.search(v):
+        return False
+    return bool(ORGAN_MARKER_RE.search(v))
 
 # 块级元素(正文按最内层块级元素收集,见 _extract_text)
 BLOCK_TAGS = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'li']
@@ -219,11 +238,28 @@ def _extract_text(root: Tag) -> str:
 
     paragraphs = []
     for elem in root.find_all(BLOCK_TAGS):
+        # 跳过表格内部的块级元素(如 <td><p>..</p></td>):表格统一按行收集,
+        # 避免与下面的 table 收集重复计数(DETAIL-1)
+        if elem.find_parent(['table', 'tr']):
+            continue
         if elem.find(BLOCK_TAGS):
             continue  # 内层块级元素会单独收集,跳过外层避免重复
         text = elem.get_text(' ', strip=True)
         if text and len(text) >= 2:
             paragraphs.append(text)
+
+    # 表格文本:政府通知常把补助标准/日程放在 <table>,逐行收集,
+    # 单元格之间用空格连接,每行一段(DETAIL-1)
+    for table in root.find_all('table'):
+        for tr in table.find_all('tr'):
+            cells = tr.find_all(['td', 'th'])
+            if not cells:
+                continue
+            row = ' '.join(c.get_text(' ', strip=True) for c in cells).strip()
+            # 收敛多余空格
+            row = re.sub(r'\s+', ' ', row)
+            if row and len(row) >= 2:
+                paragraphs.append(row)
 
     # 兜底:正文容器没有任何块级子元素(纯文本节点)→ 整体取
     if not paragraphs:
@@ -237,7 +273,7 @@ def _extract_text(root: Tag) -> str:
     return text.strip()
 
 
-def _extract_metadata(html: str, soup: BeautifulSoup) -> Dict:
+def _extract_metadata(html: str, soup: BeautifulSoup, content_text: str = '') -> Dict:
     """提取发文字号、发文日期、发文机关等元数据"""
     meta: Dict = {
         'doc_number': None,    # 发文字号
@@ -254,10 +290,11 @@ def _extract_metadata(html: str, soup: BeautifulSoup) -> Dict:
     if m:
         meta['doc_number'] = m.group(0).strip()
     else:
-        # 国务院令第xxx号
-        m = re.search(r'第\s*(\d+)\s*号', full_text)
+        # 令-锚定发文字号(与 policy_parser.extract_doc_number 对齐),
+        # 去掉过松的裸「第N号」兜底,避免正文中的「第3号议题」等被误采(DETAIL-5)
+        m = re.search(r'(国务院|主席|部|省|市)?令\s*第\s*(\d+)\s*号', full_text)
         if m:
-            meta['doc_number'] = f"第{m.group(1)}号"
+            meta['doc_number'] = m.group(0).strip()
 
     # 发文日期
     for kw in KEYWORDS_OF_DATE:
@@ -273,6 +310,24 @@ def _extract_metadata(html: str, soup: BeautifulSoup) -> Dict:
         if meta['issue_date']:
             break
 
+    # 无标签日期兜底(DETAIL-4):国务院/部委文件的成文日期常在署名块,
+    # 无「成文日期:」标签。只看正文末尾的少数短行,接受:
+    #   1) 整行只有一个日期的行;或
+    #   2) 紧跟在机关名行之后的日期行。
+    # 避免误采正文中部的引用日期(如「根据2019年1月1日印发的旧办法」)。
+    if not meta['issue_date'] and content_text:
+        lines = [ln.strip() for ln in content_text.splitlines() if ln.strip()]
+        tail = lines[-6:]  # 只看末尾几行
+        for ln in tail:
+            if len(ln) > 30:
+                continue  # 署名/日期行都很短;正文中部引用的长句不采
+            dm = DATE_ONLY_LINE_RE.match(ln)
+            if dm:
+                # 取末尾最后一个纯日期行,覆盖前面的
+                meta['issue_date'] = (f"{dm.group(1)}-"
+                                      f"{int(dm.group(2)):02d}-"
+                                      f"{int(dm.group(3)):02d}")
+
     # 索引号(很多部委详情页有"索引号:"字样)
     m = re.search(r'索引号[::]\s*([A-Za-z0-9\-_/]+)', full_text)
     if m:
@@ -283,13 +338,16 @@ def _extract_metadata(html: str, soup: BeautifulSoup) -> Dict:
     if m:
         meta['category'] = m.group(1).strip()
 
-    # 发文机关(取 meta[name] 或 header 的 description)
+    # 发文机关:优先含机关名的 meta 字段;只接受像机关名的值,
+    # 拒绝人名署名(记者/编辑)和媒体名(新华社/XX日报)(DETAIL-3)
     if soup.head:
-        for tag_name in ['author', 'ArticleAuthor', 'Creator', 'Department', 'ContentSource']:
+        for tag_name in ISSUER_META_NAMES:
             tag = soup.head.find('meta', attrs={'name': tag_name})
             if tag and tag.get('content'):
-                meta['issuer'] = tag['content'].strip()
-                break
+                cand = tag['content'].strip()
+                if _is_organ_name(cand):
+                    meta['issuer'] = cand
+                    break
 
     return meta
 
@@ -307,13 +365,16 @@ def _extract_attachments(root: Tag, base_url: str) -> List[Dict]:
         full_url = urljoin(base_url, href)
         if not full_url:
             continue
-        low = full_url.lower()
-        if any(low.endswith(ext) for ext in ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.rar']):
+        # 扩展名只看 URL path,忽略 query string(DETAIL-2):
+        # a.pdf?id=9 / b.PDF?v=2 是附件;download.jsp?fileName=x.pdf 不是
+        path_low = urlparse(full_url).path.lower()
+        exts = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.rar']
+        if any(path_low.endswith(ext) for ext in exts):
             name = a.get_text(strip=True) or full_url.split('/')[-1]
             attachments.append({
                 'name': name[:120],
                 'url': full_url,
-                'type': low.rsplit('.', 1)[-1]
+                'type': path_low.rsplit('.', 1)[-1]
             })
     # 去重
     seen = set()
@@ -379,7 +440,7 @@ def extract_detail(html: str, url: str, base_url: str = '') -> Dict:
             'content_html': html,
             'word_count': len(text),
             'attachments': pre_attachments,
-            'metadata': _extract_metadata(html, soup),
+            'metadata': _extract_metadata(html, soup, text),
             'has_content': False,
             'content_quality': quality,
             'content_usable': False,
@@ -393,7 +454,7 @@ def extract_detail(html: str, url: str, base_url: str = '') -> Dict:
         if a['url'] not in seen:
             seen.add(a['url'])
             uniq.append(a)
-    metadata = _extract_metadata(html, soup)
+    metadata = _extract_metadata(html, soup, content_text)
     quality = assess_content_quality(content_text)
     has_content = len(content_text) >= 100
 
@@ -406,8 +467,10 @@ def extract_detail(html: str, url: str, base_url: str = '') -> Dict:
         'metadata': metadata,
         'has_content': has_content,
         'content_quality': quality,
-        # 注意: has_content 语义不变(是否找到正文容器),是否可解析用 content_usable
-        'content_usable': bool(has_content and quality['level'] != 'low'),
+        # has_content 语义不变(是否找到正文容器,100 字门槛)。
+        # content_usable 与 has_content 解耦(DETAIL-6):非空文本 + 质量非 low,
+        # 这样「正文短 + 带附件」的申报通知不会被当作不可用。
+        'content_usable': bool(content_text.strip() and quality['level'] != 'low'),
     }
 
 

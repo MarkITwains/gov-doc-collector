@@ -1,6 +1,6 @@
 ---
 name: policy-analyzer
-description: 解析政府政策正文为结构化数据,并与给定企业画像匹配,输出 eligible/likely/uncertain/ineligible/not_applicable 五档适配结论与可读 Markdown 报告。
+description: 解析政府政策正文为结构化数据,并与给定企业画像匹配,输出 eligible/likely/uncertain/ineligible/not_applicable/expired 六档适配结论与可读 Markdown 报告。
 version: 1.6.0
 author: Hermes Team
 metadata:
@@ -175,6 +175,12 @@ print(parsed['extract_method'], parsed['llm_extract_added'])  # 'rules+llm' 1
 - `ineligible` ❌ — 任一硬性条件不满足(返回后建议仍可关注申报截止前条件放宽)。
 - `not_applicable` ⏭ — `triage_category` 判定为 新闻/规范/其它(非申报类),
                        跳过匹配。
+- `expired` ⏰ — 申报窗口已过(`deadline` 早于基准日 `today`)。原本 eligible/likely/uncertain
+               的结论会被置为 `expired`,原资格结论保留在 `eligibility_verdict`,
+               避免把已截止的政策当成可申报。`ineligible`/`not_applicable` 不变,
+               但结果仍带 `deadline_passed`(True/False/None)。
+               `match_policy`/`match_with_triage` 可传 `today`(date 或 'YYYY-MM-DD',
+               缺省取当天)固定基准日,便于复现/评测。
 
 ## 解析输出
 

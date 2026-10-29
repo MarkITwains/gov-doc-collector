@@ -183,7 +183,9 @@ def evaluate_golden(records: List[Dict], ignore_fields: Tuple[str, ...] = ('othe
         # verdict(需 profile)
         if rec.get('profile') and rec.get('expect_verdict'):
             verdict_total += 1
-            m = match_with_triage(parsed, rec['profile'])
+            # 截止日感知:golden 记录可带 "today" 固定评测基准日,
+            # 避免真实世界日期推移把历史截止的记录判成 expired(MAT-3)
+            m = match_with_triage(parsed, rec['profile'], today=rec.get('today'))
             if m['verdict'] == rec['expect_verdict']:
                 verdict_ok += 1
             else:

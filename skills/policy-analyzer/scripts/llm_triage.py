@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import threading
 from typing import Dict, List, Optional
 
 import requests
@@ -42,6 +43,8 @@ VALID_CATEGORIES = ('apply', 'regulate', 'news', 'other')
 
 # 熔断状态(模块级;调用方可随时 reset_failure_state() 重置)
 _failure_count = 0
+# 保护 _failure_count 的并发读写(FastMCP 可能并发派发工具调用)
+_failure_lock = threading.Lock()
 
 # 四档定义(写入 prompt)
 CATEGORY_DEFINITIONS = """\
@@ -89,21 +92,25 @@ def resolve_model(**config_overrides) -> str:
 
 def _record_failure() -> None:
     global _failure_count
-    _failure_count += 1
-    if _failure_count == FAILURE_THRESHOLD:
+    with _failure_lock:
+        _failure_count += 1
+        count = _failure_count
+    if count == FAILURE_THRESHOLD:
         logger.warning('LLM triage 连续失败 %d 次,本进程内停用 LLM,后续全部走规则兜底',
-                       _failure_count)
+                       count)
 
 
 def _record_success() -> None:
     global _failure_count
-    _failure_count = 0
+    with _failure_lock:
+        _failure_count = 0
 
 
 def reset_failure_state() -> None:
     """重置熔断计数(API 恢复后可由调用方显式恢复)。"""
     global _failure_count
-    _failure_count = 0
+    with _failure_lock:
+        _failure_count = 0
 
 
 def build_prompt(title: str, text: str, doc_type: str,
@@ -152,13 +159,26 @@ def _extract_json(content: str) -> Optional[Dict]:
             return json.loads(m.group(1))
         except json.JSONDecodeError:
             pass
-    # 提取第一个 {...} 块
-    m = re.search(r'\{[^{}]*"category"[^{}]*\}', content, re.DOTALL)
-    if m:
+    # 提取 {...} 块:可能有多个(噪声里夹带诱饵对象),
+    # 优先取 category 合法(在 VALID_CATEGORIES 内)的**最后一个**;
+    # 没有合法 category 的则退回第一个可解析对象。
+    candidates = re.findall(r'\{[^{}]*"category"[^{}]*\}', content, re.DOTALL)
+    first_parsed = None
+    last_valid = None
+    for frag in candidates:
         try:
-            return json.loads(m.group(0))
+            obj = json.loads(frag)
         except json.JSONDecodeError:
-            pass
+            continue
+        if first_parsed is None:
+            first_parsed = obj
+        cat = str(obj.get('category', '')).strip().lower()
+        if cat in VALID_CATEGORIES:
+            last_valid = obj
+    if last_valid is not None:
+        return last_valid
+    if first_parsed is not None:
+        return first_parsed
     # 兜底:扫描第一个括号配平的 JSON 对象(抽取类响应含嵌套数组/对象)
     return _balanced_json(content)
 
@@ -281,15 +301,28 @@ def classify_triage_with_llm(title: str, text: str, doc_type: str,
     return {
         'category': category,
         'reason': str(parsed.get('reason', ''))[:100],
-        'confidence': float(parsed.get('confidence', 0.0)),
+        'confidence': _safe_confidence(parsed.get('confidence')),
         'model': cfg['model'],
     }
+
+
+def _safe_confidence(value) -> float:
+    """把模型返回的 confidence 收敛成 [0,1] 的 float;非数值/异常 → 0.0。"""
+    try:
+        c = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if c != c:          # NaN
+        return 0.0
+    return max(0.0, min(1.0, c))
 
 
 def is_llm_available(**config_overrides) -> bool:
     """快速判断 LLM 是否可用(API Key 已配置,且未因连续失败被熔断)。"""
     cfg = _get_config(**config_overrides)
-    if _failure_count >= FAILURE_THRESHOLD:
+    with _failure_lock:
+        tripped = _failure_count >= FAILURE_THRESHOLD
+    if tripped:
         return False
     return bool(cfg['api_key'])
 

@@ -83,15 +83,17 @@ class SeenStore:
         """返回未采集过的条目(同批次内重复链接也去重);
         mark=True 时顺带把新链接记入缓存(需自行 save())"""
         new_items: List[Dict] = []
-        batch_seen = set()
+        batch_seen = set()          # 仅用于同批次内去重
+        new_links: List[str] = []   # 按首次出现顺序收集,供 mark_seen 保持顺序淘汰最旧
         for it in items:
             link = it.get('link')
             if not link or link in batch_seen or self.is_seen(site_key, link):
                 continue
             batch_seen.add(link)
+            new_links.append(link)
             new_items.append(it)
         if mark:
-            self.mark_seen(site_key, batch_seen)
+            self.mark_seen(site_key, new_links)
         logger.info('站点 %s: %d 条中 %d 条为新政策',
                     site_key, len(items), len(new_items))
         return new_items
