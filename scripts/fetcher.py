@@ -13,9 +13,11 @@ import requests
 
 # 兼容包内导入(from scripts.fetcher import ...)与直接脚本执行(python scripts/fetcher.py)
 try:
-    from .parser import extract_items, parse_xml_feed, parse_json_api
+    from .parser import (extract_items, parse_xml_feed, parse_json_api,
+                         DEFAULT_MIN_TITLE_LEN)
 except ImportError:
-    from parser import extract_items, parse_xml_feed, parse_json_api
+    from parser import (extract_items, parse_xml_feed, parse_json_api,
+                        DEFAULT_MIN_TITLE_LEN)
 
 logger = logging.getLogger(__name__)
 
@@ -208,11 +210,15 @@ class GovDocFetcher:
                 content_type = resp.headers.get('Content-Type', '')
 
                 if 'json' in content_type:
-                    return parse_json_api(resp.text, config.get('json_mappings', {}))
+                    return parse_json_api(
+                        resp.text, config.get('json_mappings', {}),
+                        base_url=url,
+                        min_title_len=int(config.get('min_title_len',
+                                                     DEFAULT_MIN_TITLE_LEN)))
                 elif 'xml' in content_type:
                     return parse_xml_feed(resp.text)
                 else:
-                    return extract_items(resp.text, config)
+                    return extract_items(resp.text, config, page_url=url)
 
             except Exception as e:
                 logger.debug('抓取失败(第 %d 次): %s (%s)', attempt + 1, url, e)

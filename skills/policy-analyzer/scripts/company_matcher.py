@@ -134,6 +134,9 @@ def _to_profile_unit(field: str, value: float, unit: Optional[str]) -> Optional[
         return None
     if field in ('revenue', 'registered_capital') and unit in _UNIT_TO_WAN:
         return value * _UNIT_TO_WAN[unit]
+    if field in ('revenue', 'registered_capital') and unit is not None:
+        # 单位不是金额(如增速 %):无法和画像的万元比较,交给人工复核
+        return None
     if field == 'company_age' and unit == '个月':
         return value / 12.0
     return value
@@ -141,7 +144,7 @@ def _to_profile_unit(field: str, value: float, unit: Optional[str]) -> Optional[
 
 def _company_age(profile: Dict) -> Optional[float]:
     if profile.get('company_age') is not None:
-        return float(profile['company_age'])
+        return _to_float(profile['company_age'])
     est = profile.get('established')
     if not est:
         return None
@@ -174,9 +177,43 @@ def _company_age(profile: Dict) -> Optional[float]:
     return round(days / 365.0, 2)
 
 
+# 画像数值字段的单位后缀 → 换算到画像基准单位(金额=万元)
+#   万/万元=1,  亿/亿元=10000(万元),  元=0.0001(万元)
+_PROFILE_NUM_SUFFIX = [
+    ('亿元', 10000.0), ('亿', 10000.0),
+    ('万元', 1.0), ('万', 1.0),
+    ('个月', 1.0 / 12.0),      # 年限:18个月 = 1.5 年
+    ('年', 1.0), ('人', 1.0), ('元', 0.0001),
+]
+
+
 def _to_float(value) -> Optional[float]:
-    try:
+    """把画像数值字段稳健地解析为 float(画像基准单位),无法解析返回 None。
+
+    接受: int/float;带逗号/空格的数字串 '3,200' / ' 3200 ';
+          金额后缀(换算到万元基准)'3200万' / '3200万元' / '1.2亿' / '1.2亿元' / '5000000元';
+          人数 '100人';年限 '3年' / '18个月'(=1.5)。
+    拒绝: bool(True/False 不是业务数值)。
+    """
+    if isinstance(value, bool):          # bool 是 int 子类,需先排除
+        return None
+    if isinstance(value, (int, float)):
         return float(value)
+    if not isinstance(value, str):
+        return None
+    s = value.strip().replace(',', '').replace(' ', '')
+    if not s:
+        return None
+    mult = 1.0
+    for suffix, factor in _PROFILE_NUM_SUFFIX:
+        if s.endswith(suffix):
+            s = s[:-len(suffix)]
+            mult = factor
+            break
+    if not s:
+        return None
+    try:
+        return float(s) * mult
     except (TypeError, ValueError):
         return None
 
@@ -314,10 +351,14 @@ def check_condition(cond: Dict, profile: Dict, context: Optional[Dict] = None) -
         actual = profile.get(field)
         if actual is None:
             return {'status': 'unknown', 'reason': f'画像缺少 {field}'}
+        actual_num = _to_float(actual)
+        if actual_num is None:
+            # 画像值无法解析(非数值串/bool 等)→ 降级为 unknown 待复核,绝不抛异常
+            return {'status': 'unknown', 'reason': f'画像 {field} 非数值: {actual!r}'}
         expected = _to_profile_unit(field, value, unit)
         if expected is None or op not in ('>=', '>', '<=', '<'):
             return {'status': 'review', 'reason': '条件数值未解析,需人工核对'}
-        ok = _compare(op, float(actual), expected)
+        ok = _compare(op, actual_num, expected)
         unit_label = {'revenue': '万元', 'registered_capital': '万元', 'headcount': '人',
                       'rd_ratio': '%', 'rd_staff_ratio': '%', 'patents': '件'}.get(field, unit or '')
         return {'status': 'pass' if ok else fail_status(),
@@ -354,7 +395,35 @@ def _or_group_rescue(checks: List[Dict]) -> None:
                 logger.debug('"或"关系救援: %d 条 fail→pass (text=%s)', rescued, text[:40])
 
 
-def match_policy(parsed_policy: Dict, profile: Dict) -> Dict:
+def _resolve_today(today) -> date:
+    """把 today 参数(date / 'YYYY-MM-DD' / None)解析为 date;无法解析取当天。"""
+    if isinstance(today, date):
+        return today
+    if today:
+        m = re.match(r'(\d{4})-(\d{1,2})-(\d{1,2})', str(today))
+        if m:
+            try:
+                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                pass
+    return date.today()
+
+
+def _deadline_status(deadline, today: date):
+    """解析 deadline → (ISO 字符串或 None, deadline_passed 或 None)。"""
+    if not deadline:
+        return None, None
+    m = re.match(r'(\d{4})-(\d{1,2})-(\d{1,2})', str(deadline))
+    if not m:
+        return deadline, None
+    try:
+        dl = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return deadline, None
+    return dl.isoformat(), dl < today
+
+
+def match_policy(parsed_policy: Dict, profile: Dict, today=None) -> Dict:
     """
     企业画像 vs 解析后的政策 → 适配性报告。
 
@@ -415,13 +484,24 @@ def match_policy(parsed_policy: Dict, profile: Dict) -> Dict:
     logger.debug('匹配完成: verdict=%s score=%s pass=%d fail=%d unknown=%d review=%d (title=%s)',
                  verdict, score, summary['pass'], summary['fail'],
                  summary['unknown'], summary['review'],
-                 parsed_policy.get('title', '')[:40])
+                 (parsed_policy.get('title') or '')[:40])
+
+    # 截止日感知:已过截止的申报类政策不得被当成"可申报"。
+    # 保留原始资格结论到 eligibility_verdict,把对外 verdict 置为 expired。
+    ref_today = _resolve_today(today)
+    deadline_iso, deadline_passed = _deadline_status(
+        (parsed_policy.get('validity') or {}).get('deadline'), ref_today)
+    eligibility_verdict = verdict
+    if deadline_passed and verdict in ('eligible', 'likely', 'uncertain'):
+        verdict = 'expired'
 
     return {
         'policy_title': parsed_policy.get('title'),
         'doc_number': parsed_policy.get('doc_number'),
-        'deadline': (parsed_policy.get('validity') or {}).get('deadline'),
+        'deadline': deadline_iso,
+        'deadline_passed': deadline_passed,
         'verdict': verdict,
+        'eligibility_verdict': eligibility_verdict,
         'score': score,
         'summary': summary,
         'checks': checks,
@@ -432,18 +512,22 @@ def match_policy(parsed_policy: Dict, profile: Dict) -> Dict:
     }
 
 
-def match_with_triage(parsed_policy: Dict, profile: Dict) -> Dict:
+def match_with_triage(parsed_policy: Dict, profile: Dict, today=None) -> Dict:
     """
     分流前置: 若不是'申报类'政策, 直接给 not_applicable; 否则走 match_policy。
     """
     tc = parsed_policy.get('triage_category')
     if tc and tc in ('news', 'regulate', 'other'):
+        deadline_iso, deadline_passed = _deadline_status(
+            (parsed_policy.get('validity') or {}).get('deadline'), _resolve_today(today))
         return {
             'policy_title': parsed_policy.get('title'),
             'doc_number': parsed_policy.get('doc_number'),
-            'deadline': (parsed_policy.get('validity') or {}).get('deadline'),
+            'deadline': deadline_iso,
+            'deadline_passed': deadline_passed,
             'triage_category': tc,
             'verdict': 'not_applicable',
+            'eligibility_verdict': 'not_applicable',
             'score': 0.0,
             'summary': {'pass': 0, 'fail': 0, 'soft_fail': 0, 'unknown': 0, 'review': 0},
             'checks': [],
@@ -453,12 +537,12 @@ def match_with_triage(parsed_policy: Dict, profile: Dict) -> Dict:
             'support_measures': parsed_policy.get('support_measures', []),
             'skip_reason': f'triage_category={tc}, 非申报类政策, 跳过匹配',
         }
-    return match_policy(parsed_policy, profile)
+    return match_policy(parsed_policy, profile, today=today)
 
 
 VERDICT_LABELS = {'eligible': '✅ 符合', 'likely': '🟡 大概率符合',
                   'uncertain': '❓ 信息不足', 'ineligible': '❌ 不符合',
-                  'not_applicable': '⏭  不适申报'}
+                  'not_applicable': '⏭  不适申报', 'expired': '⏰ 已截止'}
 STATUS_MARKS = {'pass': '✓', 'fail': '✗', 'soft_fail': '△', 'unknown': '?', 'review': '⊙'}
 
 
@@ -469,21 +553,35 @@ def format_report(match: Dict) -> str:
         lines.append(f"- 发文字号: {match['doc_number']}")
     if match.get('deadline'):
         lines.append(f"- 申报截止: **{match['deadline']}**")
-        # 截止时间感知:已过期明确提示,避免对着失效政策做申报准备
+        # 截止时间感知:已过期明确提示,避免对着失效政策做申报准备。
+        # 优先用结构化的 deadline_passed(由 match_policy 依 today 计算),
+        # 兼容外部/旧结果缺字段时回退到按当天解析。
+        passed = match.get('deadline_passed')
+        dl = None
         m = re.match(r'(\d{4})-(\d{1,2})-(\d{1,2})', str(match['deadline']))
         if m:
             try:
                 dl = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-                if dl < date.today():
-                    lines.append(f"- ⚠️ **已过申报截止日 {(date.today() - dl).days} 天,本期不可申报**")
             except ValueError:
-                pass
+                dl = None
+        if passed is None and dl is not None:
+            passed = dl < date.today()
+        if passed and dl is not None:
+            lines.append(f"- ⚠️ **已过申报截止日 {(date.today() - dl).days} 天,本期不可申报**")
+        elif passed:
+            lines.append("- ⚠️ **已过申报截止,本期不可申报**")
     if match.get('triage_category'):
         tc = match['triage_category']
         cat_label = {'apply': '申报/资助类', 'regulate': '规范类(法/条例)',
                      'news': '新闻/会议/招聘', 'other': '其它'}.get(tc, tc)
         lines.append(f"- 文档类别: **{cat_label}**")
-    lines.append(f"- 结论: **{VERDICT_LABELS[match['verdict']]}** (符合度 {match['score']}%)")
+    verdict = match['verdict']
+    verdict_label = VERDICT_LABELS.get(verdict, verdict)
+    lines.append(f"- 结论: **{verdict_label}** (符合度 {match['score']}%)")
+    # 已截止时,把原资格结论一并呈现,便于了解"若在窗口内本可符合"
+    elig = match.get('eligibility_verdict')
+    if verdict == 'expired' and elig and elig != 'expired':
+        lines.append(f"- 资格结论(窗口已关闭): {VERDICT_LABELS.get(elig, elig)}")
     s = match['summary']
     lines.append(f"- 条件核对: {s['pass']} 过 / {s['fail']} 不过 / "
                  f"{s['unknown']} 缺信息 / {s['review']} 待复核")
@@ -494,7 +592,7 @@ def format_report(match: Dict) -> str:
     lines.append('|---|---|---|')
     for c in match['checks']:
         st = c['result']['status']
-        lines.append(f"| {STATUS_MARKS[st]} | {c['condition']['text'][:60]} | {c['result']['reason']} |")
+        lines.append(f"| {STATUS_MARKS.get(st, '?')} | {c['condition']['text'][:60]} | {c['result']['reason']} |")
     if match.get('funding'):
         lines.append('')
         lines.append('## 可获支持')

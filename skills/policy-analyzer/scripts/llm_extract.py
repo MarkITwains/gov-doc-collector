@@ -137,14 +137,25 @@ def clear_cache() -> int:
 
 # ---------- 校验 ----------
 
-_PUNCT_CHARS = (' \t\r\n,。;；、:,：()（）[]【】'
-                '\u201c\u201d\u2018\u2019「」『』')
-_PUNCT_RE = re.compile('[' + re.escape(_PUNCT_CHARS) + ']')
+# 句内可忽略的标点(空白、句内逗号/顿号/冒号、括号、各类引号)——
+# 这些模型常增删/改写,不应影响 quote 回验。
+_IGNORE_CHARS = (' \t\r\n,、:,：()（）[]【】'
+                 '\u201c\u201d\u2018\u2019「」『』')
+_IGNORE_RE = re.compile('[' + re.escape(_IGNORE_CHARS) + ']')
+
+# 句子终止符:映射成同一个占位符(两侧都映射),这样 quote 不能跨句拼接。
+_SENTENCE_TERMINATORS = '。；;!!?？!?'
+_SENTENCE_RE = re.compile('[' + re.escape(_SENTENCE_TERMINATORS) + ']+')
+_SENTENCE_CANON = '\x00'
 
 
 def _normalize(s: str) -> str:
-    """去空白与常见标点,用于 quote 回验(容忍模型补标点/空格)。"""
-    return _PUNCT_RE.sub('', s or '')
+    """归一化用于 quote 回验:
+    - 句子终止符(。;;!!??)映射成统一占位符,保留句子边界,防止跨句拼接;
+    - 句内空白/逗号/顿号/冒号/括号/引号删除(容忍模型增删这些)。
+    """
+    s = _SENTENCE_RE.sub(_SENTENCE_CANON, s or '')
+    return _IGNORE_RE.sub('', s)
 
 
 def verify_quote(quote: str, text: str) -> bool:
@@ -156,6 +167,8 @@ def verify_quote(quote: str, text: str) -> bool:
 
 
 def _to_number(value) -> Optional[float]:
+    if isinstance(value, bool):          # bool 是 int 子类,但模型要的不是真假值
+        return None
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):

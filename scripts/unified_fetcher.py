@@ -7,12 +7,14 @@ from typing import Dict, List, Optional
 
 try:
     from .fetcher import GovDocFetcher, detect_encoding
-    from .parser import extract_items
+    from .parser import (extract_items, parse_xml_feed, parse_json_api,
+                         DEFAULT_MIN_TITLE_LEN)
     from .detail_extractor import extract_detail
     from .policy_candidate import score_candidate
 except ImportError:
     from fetcher import GovDocFetcher, detect_encoding
-    from parser import extract_items
+    from parser import (extract_items, parse_xml_feed, parse_json_api,
+                        DEFAULT_MIN_TITLE_LEN)
     from detail_extractor import extract_detail
     from policy_candidate import score_candidate
 
@@ -100,6 +102,28 @@ class UnifiedFetcher(GovDocFetcher):
                 })
             raise
 
+    def _parse_by_content_type(self, text: str, content_type: str,
+                               config: Dict, page_url: str) -> List[Dict]:
+        """按 Content-Type 分派解析(与基类 _fetch_page 一致):
+        json → parse_json_api,xml → parse_xml_feed,否则 extract_items。
+        相对链接按实际页面 URL 解析。"""
+        ct = (content_type or '').lower()
+        if 'json' in ct:
+            return parse_json_api(
+                text, config.get('json_mappings', {}),
+                base_url=page_url,
+                min_title_len=int(config.get('min_title_len',
+                                             DEFAULT_MIN_TITLE_LEN)))
+        if 'xml' in ct:
+            return parse_xml_feed(text)
+        return extract_items(text, config, page_url=page_url)
+
+    @staticmethod
+    def _has_real_item(items: List[Dict]) -> bool:
+        """某层结果是否"真的解析出列表":至少一条同时有 title 和 link。
+        避免把 JSON/XML 当 HTML 解析得到的 [{}] 当成功而短路后续层。"""
+        return any(it.get('title') and it.get('link') for it in (items or []))
+
     def _fetch_page(self, url: str, config: Dict) -> List[Dict]:
         """单页三级降级:curl_cffi → Playwright → 普通请求。
 
@@ -116,8 +140,11 @@ class UnifiedFetcher(GovDocFetcher):
                 except Exception:  # noqa: BLE001 cffi 编码探测失败回退 utf-8
                     resp.encoding = 'utf-8'
                 if resp.status_code == 200:
-                    items = extract_items(resp.text, config)
-                    if items:
+                    ct = resp.headers.get('Content-Type', '')
+                    items = self._parse_by_content_type(resp.text, ct, config, url)
+                    # 仅当解析出"真实条目"(含 title+link)才算成功,
+                    # 否则(如把 JSON 当 HTML 得到 [{}])降级到下一层
+                    if self._has_real_item(items):
                         return items
             except Exception as e:
                 logger.debug('cffi 策略失败: %s (%s)', url, e)
@@ -128,8 +155,8 @@ class UnifiedFetcher(GovDocFetcher):
             try:
                 html = self.fetch_with_js(url)
                 if html:
-                    items = extract_items(html, config)
-                    if items:
+                    items = extract_items(html, config, page_url=url)
+                    if self._has_real_item(items):
                         return items
             except Exception as e:
                 logger.debug('Playwright 策略失败: %s (%s)', url, e)
@@ -281,7 +308,9 @@ class UnifiedFetcher(GovDocFetcher):
         if prefilter is not None or only_apply:
             targets = self._select_detail_targets(items, limit, channel_type, prefilter)
         else:
-            targets = [it for it in items[:limit] if it.get('link')]
+            # 先过滤出有链接的条目,再取前 limit 条:
+            # 否则前 limit 条里若夹着无链接项,会少抓详情(即便后面有可抓的)
+            targets = [it for it in items if it.get('link')][:limit]
         if not targets:
             return items
 

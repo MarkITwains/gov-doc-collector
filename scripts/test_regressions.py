@@ -1053,5 +1053,18 @@ class TestChannelProbe(unittest.TestCase):
         self.assertLess(r2['score'], r['score'])
 
 
+AUDIT_MODULES = ('test_audit_collector', 'test_audit_detail', 'test_audit_parser',
+                 'test_audit_matcher', 'test_audit_llm_mcp')
+
+
+def load_tests(loader, tests, pattern):
+    """unittest load_tests 协议:把核心审计修复用例(test_audit_*.py)一并纳入,
+    保持 `python scripts/test_regressions.py` 仍是唯一入口。"""
+    import importlib
+    for name in AUDIT_MODULES:
+        tests.addTests(loader.loadTestsFromModule(importlib.import_module(name)))
+    return tests
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

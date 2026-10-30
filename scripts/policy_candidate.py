@@ -22,10 +22,12 @@ from typing import Dict, List, Optional
 CHANNEL_TYPES = ('apply', 'notice', 'law', 'news', 'unknown')
 
 # URL 路径特征 → 栏目类型(顺序敏感:更具体的在前)
+# apply 放在 notice 之前:申报专区常嵌在通知公告路径下(.../tzgg/sbzt/...),
+# 若 notice 先匹配会把真正的申报栏目误判为通知公告。
 URL_CHANNEL_RULES = [
-    (re.compile(r'/tzgg/|tongzhigonggao|/notice|/gsgg/|/gonggao|/tzgs/|/gg/'), 'notice'),
-    (re.compile(r'shenbao|/zcsb/|/sbzt/|/xmgl/|/xiangmu|/zizhu|/butie|'
+    (re.compile(r'shenbao|/zcsb/|/sbzt/|/xmsb/|/xmgl/|/xiangmu|/zizhu|/butie|'
                 r'/jiangbu|/xmzt/|/qyfw/|/zxfw/'), 'apply'),
+    (re.compile(r'/tzgg/|tongzhigonggao|/notice|/gsgg/|/gonggao|/tzgs/|/gg/'), 'notice'),
     (re.compile(r'/flfg/|fagui|zhengcefagui|/zcfg/|/guizhang|/tiaoli|'
                 r'/zhengce/|/zcfb/|/gfxwj/'), 'law'),
     (re.compile(r'/xwzx/|/news|/xwdt/|/gzdt/|/mtbd/|/sph/|/video|/ztbd/'), 'news'),

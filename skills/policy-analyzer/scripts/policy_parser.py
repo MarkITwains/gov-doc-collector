@@ -51,7 +51,7 @@ MAX_TARGETS = 5
 MAX_APPLICATION_MATERIALS = 15
 
 # ---------- 中文数字 ----------
-CN_DIGITS = {'零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
+CN_DIGITS = {'零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
              '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
 
 
@@ -202,10 +202,56 @@ def extract_outline(paragraphs: List[str], max_items: int = MAX_OUTLINE_ITEMS) -
 # ---------- 元数据 ----------
 DOC_NUMBER_RE = re.compile(r'[一-龥]{1,8}[〔【\[](\d{4})[〕】\]]\s*第?\s*\d+\s*号')
 DATE_RE = re.compile(r'(\d{4})年(\d{1,2})月(\d{1,2})日')
+# 中文数字日期(公文常见): 二〇二六年七月三十一日 / 二〇二八年十二月三十一日
+# 年份为 2-4 位中文数字(含〇/零);月/日支持 十/二十/三十一 等十位写法。
+_CN_DATE_CHARS = r'[〇零一二三四五六七八九十]'
+CN_DATE_RE = re.compile(
+    r'(' + _CN_DATE_CHARS + r'{2,4})年(' + _CN_DATE_CHARS + r'{1,3})月('
+    + _CN_DATE_CHARS + r'{1,3})日')
+
+
+def _cn_year(s: str) -> Optional[int]:
+    """逐字拼年份(二〇二六 → 2026);任一字不是数字返回 None。"""
+    val = 0
+    for ch in s:
+        if ch not in CN_DIGITS:
+            return None
+        val = val * 10 + CN_DIGITS[ch]
+    return val
 
 
 def _fmt_date(m) -> str:
     return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+
+
+def _fmt_cn_date(m) -> Optional[str]:
+    """把中文数字日期匹配转成 YYYY-MM-DD;月/日复用 cn_num(支持十位)。"""
+    y = _cn_year(m.group(1))
+    mo = cn_num(m.group(2))
+    d = cn_num(m.group(3))
+    if y is None or mo is None or d is None:
+        return None
+    return f"{y:04d}-{int(mo):02d}-{int(d):02d}"
+
+
+def _iter_dates(text: str):
+    """按出现顺序产出 (start, end, 'YYYY-MM-DD'),阿拉伯/中文数字日期都覆盖。"""
+    hits = []
+    for m in DATE_RE.finditer(text):
+        hits.append((m.start(), m.end(), _fmt_date(m)))
+    for m in CN_DATE_RE.finditer(text):
+        iso = _fmt_cn_date(m)
+        if iso:
+            hits.append((m.start(), m.end(), iso))
+    hits.sort(key=lambda x: x[0])
+    return hits
+
+
+def _first_date(text: str) -> Optional[str]:
+    """文本中第一个(阿拉伯或中文)日期的 ISO 串,无则 None。"""
+    for _s, _e, iso in _iter_dates(text):
+        return iso
+    return None
 
 
 def extract_doc_number(text: str) -> Optional[str]:
@@ -219,24 +265,36 @@ def extract_doc_number(text: str) -> Optional[str]:
 
 
 # ---------- 有效期 / 截止 ----------
+# 阿拉伯或中文数字日期的通用子模式(不分组,供拼接到更大规则里)
+_ANY_DATE_PAT = r'(?:\d{4}年\d{1,2}月\d{1,2}日|' + _CN_DATE_CHARS + r'{2,4}年' \
+    + _CN_DATE_CHARS + r'{1,3}月' + _CN_DATE_CHARS + r'{1,3}日)'
+# 范围分隔符:起/至/到/—/-/~
+_RANGE_SEP = r'(?:起\s*)?(?:至|到|—|－|-|~|～)'
+# 申报截止动词(真正的"提交材料"语义)。"申报"本身也算(请于X日前完成网上申报),
+# 资格/里程碑日由下面的 _NOT_SUBMIT 排除。
+_SUBMIT_VERB = r'(?:报送|提交|报名|上报材料|申报|填报|递交|呈报)'
+# 日期与提交动词之间若出现这些词,说明该日期是资格/建设里程碑,不是申报截止。
+# 注意不含"完成":"前完成申报"是截止,"前完成项目建设"靠"建设"排除。
+_NOT_SUBMIT = re.compile(r'注册|成立|设立|取得|建设|验收|竣工|投产')
+
+
 def extract_validity(text: str) -> Dict:
+    text = text or ''
     v = {'effective_from': None, 'valid_until': None, 'valid_years': None, 'deadline': None}
 
-    m = re.search(r'自' + DATE_RE.pattern + r'起?(?:施行|实施|执行|生效)', text)
+    m = re.search(r'自(' + _ANY_DATE_PAT + r')起?(?:施行|实施|执行|生效)', text)
     if m:
-        v['effective_from'] = _fmt_date(m)
+        v['effective_from'] = _first_date(m.group(1))
     elif re.search(r'自(印发|发布|公布)之日起(施行|实施|执行|生效)', text):
         v['effective_from'] = '发布之日'
 
-    m = re.search(r'有效期[至截至]\s*' + DATE_RE.pattern, text)
+    m = re.search(r'有效期[至截至]\s*(' + _ANY_DATE_PAT + r')', text)
     if m:
-        v['valid_until'] = _fmt_date(m)
+        v['valid_until'] = _first_date(m.group(1))
     if v['valid_until'] is None:
         m = re.search(r'有效期[至截至][^。]{0,15}?为止', text)
         if m:
-            inner = DATE_RE.search(m.group(0))
-            if inner:
-                v['valid_until'] = _fmt_date(inner)
+            v['valid_until'] = _first_date(m.group(0))
 
     m = re.search(r'有效期为?\s*([一二三四五六七八九十\d]{1,3})\s*年', text)
     if m:
@@ -244,13 +302,43 @@ def extract_validity(text: str) -> Dict:
         if n:
             v['valid_years'] = int(n)
 
-    # 申报截止: "申报截止时间为...日" / "请于...日前报送/提交"
-    m = re.search(r'(?:申报|申请|受理|报名)[^。]{0,12}?(?:截止|截至)[^。]{0,8}?' + DATE_RE.pattern, text)
-    if not m:
-        m = re.search(DATE_RE.pattern + r'(?:前|之前)[^。]{0,15}?(?:报送|提交|申报|报名|上报)', text)
-    if m:
-        v['deadline'] = _fmt_date(m)
+    v['deadline'] = _extract_deadline(text)
     return v
+
+
+def _extract_deadline(text: str) -> Optional[str]:
+    """申报截止日。优先显式"截止/截至";范围取末端;"DATE前…报送"需排除资格/里程碑日。"""
+    # TRI-4: "(申报|受理|申请)(时间|期限|日期)为? DATE 起? 至 DATE" → 第二个日期为截止
+    rng = re.search(
+        r'(?:申报|受理|申请)(?:时间|期限|日期)[^。]{0,4}?(' + _ANY_DATE_PAT + r')\s*'
+        + _RANGE_SEP + r'\s*(' + _ANY_DATE_PAT + r')', text)
+    if rng:
+        return _first_date(rng.group(2))
+
+    # 显式"申报/申请/受理/报名 … 截止/截至 … DATE"(最强信号)
+    m = re.search(
+        r'(?:申报|申请|受理|报名)[^。]{0,12}?(?:截止|截至)[^。]{0,8}?(' + _ANY_DATE_PAT + r')',
+        text)
+    if m:
+        return _first_date(m.group(1))
+    # 带标签的"截止时间/截止日期 … DATE"(如"材料报送截止时间为…")。
+    # 只认"截止"+时间/日期标签:裸"截至X日"多是统计口径("截至2025年底,全市共有…"),不是申报截止。
+    m = re.search(r'截止(?:时间|日期)[为是:： ]{0,3}(' + _ANY_DATE_PAT + r')', text)
+    if m:
+        return _first_date(m.group(1))
+    # "申报/受理/报送 … DATE(时刻)? 截止"(如"本次申报工作于2026年6月30日截止")
+    m = re.search(r'(?:申报|申请|受理|报名|报送|提交)[^。]{0,15}?(' + _ANY_DATE_PAT
+                  + r')(?:\s*\d{1,2}[:：]\d{2})?\s*(?:截止|止)', text)
+    if m:
+        return _first_date(m.group(1))
+
+    # 前向"DATE前…提交动词":仅当该日期与动词之间不含注册/成立/完成/建设等
+    # 资格或里程碑语义时才算申报截止(TRI-1/TRI-2)。可能有多个候选,取首个合格的。
+    for m in re.finditer(r'(' + _ANY_DATE_PAT + r')(?:前|之前)([^。]{0,15}?)' + _SUBMIT_VERB, text):
+        if _NOT_SUBMIT.search(m.group(2)):
+            continue
+        return _first_date(m.group(1))
+    return None
 
 
 # ---------- 支持方式 ----------
@@ -274,7 +362,7 @@ def detect_measures(text: str) -> List[str]:
 
 
 # ---------- 资金额度 ----------
-AMOUNT_RE = re.compile(r'(\d+(?:\.\d+)?)\s*(亿元|万元)')
+AMOUNT_RE = re.compile(r'(\d+(?:\.\d+)?)\s*(亿元|万元|亿|万)')
 # 句末边界:数值提取的窗口不跨句
 _SENTENCE_END_RE = re.compile(r'[。;；\n]')
 # 小句边界(逗号也算):限定词("最高/不超过")只看本小句,避免跨小句误判
@@ -288,10 +376,10 @@ FUNDING_VERB_RE = re.compile(r'补贴|补助|资助|奖励|奖补|支持|给予|
 
 
 def _norm_amount(value: float, unit: str) -> Optional[float]:
-    """统一为万元"""
-    if unit == '亿元':
+    """统一为万元(裸"亿/万"按"亿元/万元"处理)"""
+    if unit in ('亿元', '亿'):
         return value * 10000
-    if unit == '万元':
+    if unit in ('万元', '万'):
         return value
     return None
 
@@ -405,6 +493,20 @@ OP_POST = {'以上': '>=', '及以上': '>=', '以下': '<=', '及以下': '<=',
 _OP_PRE_RE = re.compile('(' + '|'.join(OP_PRE) + r')\s*' + NUM_TOKEN + r'\s*' + UNIT_TOKEN + '?')
 _OP_POST_RE = re.compile(NUM_TOKEN + r'\s*' + UNIT_TOKEN + r'?\s*(及?以[上下内])')
 _NUM_UNIT_RE = re.compile(NUM_TOKEN + r'\s*' + UNIT_TOKEN)
+# 数值区间: "500-1000万元" / "5000万元至1亿元" / "500万~1000万元"
+# 低值可省略单位或只写裸"万/亿"(继承/归一到高值单位);分隔符含 -－—~～ 与 至/到。
+_RANGE_RE = re.compile(
+    NUM_TOKEN + r'\s*(亿元|万元|亿|万)?\s*(?:[-－—~～]|至|到)\s*'
+    + NUM_TOKEN + r'\s*' + UNIT_TOKEN)
+
+
+def _norm_unit_token(u: Optional[str]) -> Optional[str]:
+    """裸"万/亿"归一到"万元/亿元",其余原样返回。"""
+    if u == '万':
+        return '万元'
+    if u == '亿':
+        return '亿元'
+    return u
 
 
 def extract_numeric(text: str):
@@ -425,9 +527,22 @@ def extract_numeric_all(text: str) -> List[tuple]:
     """提取文本中**所有**数值条件,返回 [(start, end, op, value, unit), ...]。
 
     一条条件常同时给出上下界("不少于20人且不超过300人"),只取第一个会丢掉上界,
-    让"500 人也算通过"。找不到任何数值时返回 []。
+    让"500 人也算通过"。"500-1000万元"这类区间同样拆成 >=低 / <=高 两界。
+    找不到任何数值时返回 []。
     """
     found = []
+    # 数值区间 → 下界 >=low、上界 <=high;low 缺单位时继承 high 的单位
+    for m in _RANGE_RE.finditer(text):
+        low, high = cn_num(m.group(1)), cn_num(m.group(3))
+        if low is None or high is None:
+            continue
+        low_unit = _norm_unit_token(m.group(2)) or m.group(4)
+        high_unit = m.group(4)
+        # "2024-2026年"是年份区间,不是"成立 N 年"这类数值条件
+        if high_unit in ('年', '周年') and max(low, high) >= 1900:
+            continue
+        found.append((m.start(), m.start(), '>=', low, low_unit))
+        found.append((m.end(), m.end(), '<=', high, high_unit))
     for m in _OP_PRE_RE.finditer(text):
         found.append((m.start(), m.end(), OP_PRE[m.group(1)],
                       cn_num(m.group(2)), m.group(3)))
@@ -440,11 +555,20 @@ def extract_numeric_all(text: str) -> List[tuple]:
         if m:
             found.append((m.start(), m.end(), '>=', cn_num(m.group(1)), m.group(2)))
     found.sort(key=lambda x: x[0])
-    dedup, seen_start = [], set()
+    # 去重: 丢弃与已保留项"同 op/value/unit 且 span 重叠"的后续匹配
+    # ("达到1亿元"与"1亿元以上"重叠且同义 → 只留一条,见 EXT-4)。
+    dedup, kept = [], []  # kept: [(start, end, op, value, unit)]
     for item in found:
-        if item[0] in seen_start:
+        s, e, op, val, unit = item
+        dup = False
+        for ks, ke, kop, kval, kunit in kept:
+            overlap = s < ke and ks < e
+            if overlap and (op, val, unit) == (kop, kval, kunit):
+                dup = True
+                break
+        if dup:
             continue
-        seen_start.add(item[0])
+        kept.append(item)
         dedup.append(item)
     return dedup
 
@@ -525,11 +649,12 @@ def _field_numerics(window: str, field: str) -> List[tuple]:
     for pos, end, op, value, unit in extract_numeric_all(window):
         if value is None:
             continue
-        if out:
-            if allowed and unit is not None and unit not in allowed:
-                continue
-            if _has_other_field(window[prev_end:pos], field):
-                continue
+        # 单位对不上该字段的数值不属于它(含第一个):
+        # "营业收入年均增长不低于10%" 的 10% 是增速,不是营收门槛
+        if allowed and unit is not None and unit not in allowed:
+            continue
+        if out and _has_other_field(window[prev_end:pos], field):
+            continue
         out.append((op, value, unit))
         prev_end = end
     return out
